@@ -1,0 +1,430 @@
+/* Header Toolbar */
+ion-header {
+  ion-toolbar {
+    font-weight: bold;
+    box-shadow: none;
+    --background: var(--ion-bg-color);
+    --color: var(--ion-tx-color);
+    padding-top: 10px;
+
+    ion-title{
+      font-size: 1.3rem;
+      font-weight: 700;
+      --color: var(--ion-color-primary);
+    }
+  }
+}
+ion-content {
+  --background: var(--ion-bg-color);
+  --color: var(--ion-tx-color);
+}
+ion-segment {
+  margin: 5px 0;
+}
+.centered-item {
+  --background: var(--ion-bg-color);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: 15px;
+}
+.centered-item ion-input, .centered-item ion-button {
+  margin: 5px;
+}
+ion-button{
+  text-transform: none;
+  --box-shadow: none !important;
+}
+.download-button{
+  margin: 15px;
+  --box-shadow: none !important;
+}
+.download-button[disabled] {
+  opacity: 0.6;
+  cursor: not-allowed;
+  --background: #d3d3d3;
+  --background-activated: #d3d3d3;
+  --background-focused: #d3d3d3;
+  --background-hover: #d3d3d3; 
+  --box-shadow: none !important;
+}
+ion-input {
+  margin-top: 16px;
+  margin-right: 3px;
+}
+//
+ion-input {
+  --border-radius: 8px; /* Border radius */
+  --border-color: var(--ion-border) !important; /* Border color */
+  --border-width: 2px; /* Border width */
+  --padding-start: 16px; /* Padding start */
+  --padding-end: 16px; /* Padding end */
+
+  /* Style the input text */
+  --placeholder-color: #999; /* Placeholder color */
+  --placeholder-font-size: 14px; /* Placeholder font size */
+  --placeholder-font-style: italic; /* Placeholder font style */
+
+  /* Style the input text */
+  color: #333; /* Input text color */
+  font-size: 14px; /* Input text font size */
+  font-weight: 700; /* Input text font weight */
+}
+//
+.custom-segment {
+  border-bottom: 2px solid #e9e9e9;
+}
+.custom-button {
+  --background: transparent;
+  --color: #666;
+  --indicator-color: indigo;
+  --border-radius: 8px;
+  font-weight: 700;
+  text-transform: none;
+}
+//
+
+/**/
+.download-item {
+  --background: #f4f4f4;
+  --border-radius: 7px;
+  margin: 5px;
+  padding: 5px;
+}
+.download-item ion-thumbnail {
+  border-radius: 8px;
+  overflow: hidden;
+  height: 110px;
+  width: 110px;
+}
+.download-item ion-label {
+  margin-left: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.progress{
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.download-item h3 {
+  margin: 0;
+  margin-top: 5px;
+  font-weight: 700;
+  font-size: 14px;
+}
+.download-item .progress-text {
+  text-align: right;
+  //margin-top: 4px;
+  margin-left: 7px;
+  font-size: 12px;
+  color: #666;
+}
+/*
+*/
+.downloaded-video-item {
+  --background: #f4f4f4;
+  --border-radius: 7px;
+  margin: 5px;
+  padding: 2px;
+}
+
+.downloaded-video-item ion-thumbnail {
+  border-radius: 8px;
+  overflow: hidden;
+  height: 110px;
+  width: 110px;
+}
+
+.downloaded-video-item ion-label {
+  margin-left: 10px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.downloaded-video-item h3 {
+  margin: 0;
+  margin-top: 5px;
+  font-weight: 700;
+  font-size: 15px;
+}
+
+.downloaded-video-item p {
+  margin: 0;
+  margin-top: 7px;
+  font-weight: 500;
+  font-size: 12px;
+  color: #000;
+}
+/**/
+ion-list {
+  margin-top: 16px;
+  background: transparent;
+}
+
+.videoCard{
+  box-shadow: none !important;
+  --background: var(--ion-bg-color);
+}
+ion-card-title{
+  font-size: 0.7rem; 
+}
+// 
+.download-card {
+  margin: 16px;
+  transition: opacity 0.5s ease-in-out, transform 0.5s ease-in-out;
+  opacity: 1;
+
+  box-shadow: 8px 8px 16px rgba(0, 0, 0, 0.1), 
+              -8px -8px 16px rgba(255, 255, 255, 0.8);
+  --background: var(--plug-card-bg);
+  margin: 16px;
+}
+ion-item{
+  --background: var(--plug-card-bg);
+}
+.download-card ion-label h3{
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #000;
+}
+.download-card ion-label p{
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: #000;
+}
+//
+ion-list-header{
+  font-weight: 700;
+  --color: var(--ion-tx-color);
+}
+.downloaded_videos_card{
+  --background: var(--ion-bg-color);
+  margin-bottom: 5px;
+  margin-top: 5px;
+}
+.downloaded_videos_card .videoName {
+  margin-bottom: 5px;
+  margin-top: 5px;
+}
+.videoName{
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #000;
+}
+.video-meta{
+  font-size: 0.7rem;
+  font-weight: 500;
+  color: #414141;
+}
+//
+
+ion-item-options {
+  --ion-item-option-button-background-activated: transparent; /* Remove background on click/active */
+}
+ion-item-option {
+  --background: transparent; /* Ensure the default background is transparent */
+  color: #141414;
+  text-transform: none;
+}
+ion-item-option:hover {
+  background: transparent; /* Remove background on hover */
+}
+ion-item-option:active {
+  background: transparent; /* Remove background on active/click (redundant if the first rule works) */
+  opacity: 1; /* Ensure opacity doesn't change on click */
+}
+
+:host ::ng-deep ion-thumbnail img {
+  object-fit: cover;
+  height: 100%;
+  width: 100%;
+  border-radius: 8px;
+}
+
+.video-preview {
+  margin-top: 20px;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 50vh;
+  text-align: center;
+  
+  ion-icon {
+    font-size: 48px;
+    margin-bottom: 16px;
+  }
+  
+  p {
+    color: var(--ion-color-medium);
+  }
+}
+
+/*.player-content {
+  --background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}*/
+
+
+
+
+//
+/* In your SCSS (home.page.scss) */
+.player-title{
+  color: #000;
+  font-size: 0.8rem !important;
+}
+.player-content {
+  --background: #000;
+  height: 100%;
+  
+  .video-container {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      pointer-events: none;
+    }
+    
+    .custom-controls {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+      padding: 10px;
+      z-index: 10;
+      transition: opacity 0.3s ease;
+      
+      .progress-container {
+        width: 100%;
+        
+        .progress-bar {
+          --bar-background: rgba(255,255,255,0.3);
+          --bar-background-active: var(--ion-color-primary);
+          --knob-background: var(--ion-color-primary);
+          --knob-size: 12px;
+          padding: 0;
+        }
+        
+        .time-display {
+          display: flex;
+          justify-content: space-between;
+          color: white;
+          font-size: 12px;
+          margin-top: -8px;
+        }
+      }
+      
+      .main-controls {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 5px 10px;
+        
+        ion-button {
+          --color: white;
+          --padding-start: 8px;
+          --padding-end: 8px;
+          
+          ion-icon {
+            font-size: 24px;
+          }
+        }
+      }
+    }
+  }
+}
+
+.video-container.fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: black;
+  z-index: 1000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.video-container.fullscreen video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.video-container.fullscreen .custom-controls {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 10px;
+  z-index: 1001;
+}
+
+/* Hide native controls elements */
+video::-webkit-media-controls {
+  display: none !important;
+}
+
+
+
+
+
+
+
+.completed-video-card {
+  //margin: 10px;
+  border-radius: 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  transition: transform 0.3s ease;
+}
+
+.completed-video-card:hover {
+  transform: scale(1.02);
+}
+
+.completed-video-card ion-thumbnail{
+  margin-top: 14px;
+  margin-bottom: 14px;
+}
+
+.completed-video-card ion-thumbnail img {
+  border-radius: 8px;
+}
+
+.completed-video-card h3 {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #000;
+  margin-bottom: 8px;
+  margin-top: 6px;
+}
+
+.completed-video-card p {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: #333;
+}
+/*
+
+.downloaded_videos_card .videoName {
+  margin-bottom: 8px;
+  margin-top: 6px;
+}*/

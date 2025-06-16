@@ -1,0 +1,7 @@
+{
+  "name": "Fb-Downloader",
+  "integrations": {
+    "capacitor": {}
+  },
+  "type": "angular"
+}

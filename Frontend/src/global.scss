@@ -1,0 +1,167 @@
+/*
+ * App Global CSS
+ * ----------------------------------------------------------------------------
+ * Put style rules here that you want to apply globally. These styles are for
+ * the entire app and not just one component. Additionally, this file can be
+ * used as an entry point to import other CSS/Sass files to be included in the
+ * output CSS.
+ * For more information on global stylesheets, visit the documentation:
+ * https://ionicframework.com/docs/layout/global-stylesheets
+ */
+
+/* Core CSS required for Ionic components to work properly */
+@import "@ionic/angular/css/core.css";
+
+/* Basic CSS for apps built with Ionic */
+@import "@ionic/angular/css/normalize.css";
+@import "@ionic/angular/css/structure.css";
+@import "@ionic/angular/css/typography.css";
+@import "@ionic/angular/css/display.css";
+
+/* Optional CSS utils that can be commented out */
+@import "@ionic/angular/css/padding.css";
+@import "@ionic/angular/css/float-elements.css";
+@import "@ionic/angular/css/text-alignment.css";
+@import "@ionic/angular/css/text-transformation.css";
+@import "@ionic/angular/css/flex-utils.css";
+
+/**
+ * Ionic Dark Mode
+ * -----------------------------------------------------
+ * For more info, please see:
+ * https://ionicframework.com/docs/theming/dark-mode
+ */
+
+/* @import "@ionic/angular/css/palettes/dark.always.css"; */
+/* @import "@ionic/angular/css/palettes/dark.class.css"; */
+@import "@ionic/angular/css/palettes/dark.system.css";
+
+
+/* Custom Loading Styles */
+.custom-loading {
+  .loading-wrapper {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+    
+    .loading-content {
+      font-weight: 500;
+      color: #050505;
+    }
+    
+    .loading-spinner {
+      color: #1877f2;
+    }
+  }
+}
+
+/* Custom Alert Styles */
+.custom-alert {
+  --background: #ffffff; /* Background color */
+  --backdrop-opacity: 0.8; /* Backdrop opacity */
+  --border-radius: 16px; /* Rounded corners */
+  --box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2); /* Shadow */
+  --color: #333333; /* Text color */
+}
+
+.custom-alert .alert-title {
+  font-size: 20px;
+  font-weight: bold;
+  color: #000; /* Ionic primary color */
+  margin-bottom: 10px;
+}
+
+.custom-alert .alert-message {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: #666666;
+  //margin-bottom: 20px;
+}
+
+/*.custom-alert .alert-button-group {
+  display: flex;
+  //justify-content: space-between;
+  gap: 10px;
+}*/
+
+.custom-alert .alert-button {
+  //flex: 1;
+  border-radius: 8px;
+  font-weight: bold;
+  text-transform: none;
+  transition: background-color 0.3s ease;
+}
+
+.custom-alert .alert-button.alert-button-cancel {
+  --background: #f4f4f4;
+  --color: #666666;
+}
+
+.custom-alert .alert-button.alert-button-confirm {
+  --background: #3880ff; /* Ionic primary color */
+  --color: #ffffff;
+}
+
+.custom-alert .alert-button.alert-button-confirm:hover {
+  --background: #3171e0; /* Slightly darker on hover */
+}
+
+.custom-alert .alert-button.alert-button-cancel:hover {
+  --background: #e0e0e0; /* Slightly darker on hover */
+}
+
+.custom-alert .alert-button.alert-button-cancel {
+  background: #e7e7e7;
+  color: #666666;
+}
+
+.custom-alert .alert-button.alert-button-confirm {
+  background: indigo; /* Ionic primary color */
+  color: #ffffff;
+}
+.custom-alert .alert-button.delete-button {
+  background: red; /* Ionic primary color */
+  color: #ffffff;
+}
+.custom-alert .alert-button.delete-button:hover {
+  background: rgb(214, 66, 66); /* Ionic primary color */
+  color: #ffffff;
+}
+
+.custom-alert .alert-button.alert-button-confirm:hover {
+  --background: #3171e0; /* Slightly darker on hover */
+}
+
+.custom-alert .alert-button.alert-button-cancel:hover {
+  --background: #e0e0e0; /* Slightly darker on hover */
+}
+
+
+
+
+//
+
+/* Custom Toast Styles */
+.user-friendly-toast {
+  --background: var(--plug-card-bg);
+  --color: black;
+  --border-radius: 35px;
+  font-weight: 500;
+  font-size: 0.8rem;
+  --box-shadow: none !important;
+}
+
+ion-toast.user-friendly-toast::part(button) {
+  border-left: 2px solid #d2d2d2;
+  color: black;
+}
+
+.custom-toast {
+  --background: var(--plug-card-bg);
+  --color: black;
+  --border-radius: 35px;
+  font-weight: 500;
+  font-size: 0.8rem;
+  --box-shadow: none !important;
+}
