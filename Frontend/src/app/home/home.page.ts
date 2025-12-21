@@ -52,6 +52,8 @@ export class TimeFormatPipe implements PipeTransform {
   ]
 })
 export class HomePage implements OnDestroy {
+  // ADD THIS: Base API URL at the top
+  private readonly API_BASE_URL = 'https://facebook-downloader-production.up.railway.app';
   @ViewChild('videoPlayer', { static: false }) videoPlayerRef?: ElementRef<HTMLVideoElement>;
 
   segment: string = 'url';
@@ -457,7 +459,7 @@ togglePlay() {
   
     this.presentToast('Looking for your video...', 'medium', 2000);
   
-    this.http.post<any>('http://100.76.48.6:3000/fetch-fb-video-data', { url }).subscribe({
+    this.http.post<any>(`${this.API_BASE_URL}/fetch-fb-video-data`, { url }).subscribe({
       next: async (response) => {
         await loading.dismiss();
   
