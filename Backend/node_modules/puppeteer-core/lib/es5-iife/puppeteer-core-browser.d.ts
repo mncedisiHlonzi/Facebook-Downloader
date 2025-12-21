@@ -353,6 +353,18 @@ export declare abstract class Browser extends EventEmitter<BrowserEvents> {
      */
     deleteCookie(...cookies: Cookie[]): Promise<void>;
     /**
+     * Installs an extension and returns the ID. In Chrome, this is only
+     * available if the browser was created using `pipe: true` and the
+     * `--enable-unsafe-extension-debugging` flag is set.
+     */
+    abstract installExtension(path: string): Promise<string>;
+    /**
+     * Uninstalls an extension. In Chrome, this is only available if the browser
+     * was created using `pipe: true` and the
+     * `--enable-unsafe-extension-debugging` flag is set.
+     */
+    abstract uninstallExtension(id: string): Promise<void>;
+    /**
      * Whether Puppeteer is connected to this {@link Browser | browser}.
      *
      * @deprecated Use {@link Browser | Browser.connected}.
@@ -376,6 +388,7 @@ export declare abstract class Browser extends EventEmitter<BrowserEvents> {
      * @experimental
      */
     abstract get debugInfo(): DebugInfo;
+
 }
 
 /**
@@ -844,6 +857,14 @@ export declare interface ClickOptions extends MouseClickOptions {
      * Offset for the clickable point relative to the top-left corner of the border box.
      */
     offset?: Offset;
+    /**
+     * An experimental debugging feature. If true, inserts an element into the
+     * page to highlight the click location for 10 seconds. Might not work on all
+     * pages and does not persist across navigations.
+     *
+     * @experimental
+     */
+    debugHighlight?: boolean;
 }
 
 /**
@@ -999,6 +1020,15 @@ export declare interface ConnectOptions {
      * @defaultValue `false`
      */
     acceptInsecureCerts?: boolean;
+    /**
+     * Experimental setting to disable monitoring network events by default. When
+     * set to `false`, parts of Puppeteer that depend on network events would not
+     * work such as HTTPRequest and HTTPResponse.
+     *
+     * @experimental
+     * @defaultValue `true`
+     */
+    networkEnabled?: boolean;
     /**
      * Sets the viewport for each page.
      *
@@ -2451,11 +2481,6 @@ export declare class FileChooser {
 /**
  * @public
  */
-export declare type FileFormat = 'gif' | 'webm' | 'mp4';
-
-/**
- * @public
- */
 export declare interface FirefoxSettings {
     /**
      * Tells Puppeteer to not download the browser during installation.
@@ -3551,6 +3576,11 @@ export declare abstract class HTTPResponse {
 /**
  * @public
  */
+export declare type ImageFormat = 'png' | 'jpeg' | 'webp';
+
+/**
+ * @public
+ */
 export declare type InnerParams<T extends unknown[]> = {
     [K in keyof T]: FlattenHandle<T[K]>;
 };
@@ -3974,6 +4004,12 @@ export declare interface LaunchOptions extends ConnectOptions {
      * @defaultValue `false`
      */
     ignoreDefaultArgs?: boolean | string[];
+    /**
+     * If `true`, avoids passing default arguments to the browser that would
+     * prevent extensions from being enabled. Passing a list of strings will
+     * load the provided paths as unpacked extensions.
+     */
+    enableExtensions?: boolean | string[];
     /**
      * Close the browser process on `Ctrl+C`.
      * @defaultValue `true`
@@ -5499,6 +5535,9 @@ export declare abstract class Page extends EventEmitter<PageEvents> {
     /**
      * Waits for the network to be idle.
      *
+     * @remarks The function will always wait at least the
+     * set {@link WaitForNetworkIdleOptions.idleTime | IdleTime}.
+     *
      * @param options - Options to configure waiting behavior.
      * @returns A promise which resolves once the network is idle.
      */
@@ -6925,8 +6964,9 @@ declare namespace Puppeteer_2 {
         GeolocationOptions,
         MediaFeature,
         ScreenshotClip,
+        ImageFormat,
+        VideoFormat,
         ScreenshotOptions,
-        FileFormat,
         ScreencastOptions,
         QueryOptions,
         PageEvent,
@@ -7275,13 +7315,20 @@ export declare interface ScreencastOptions {
     /**
      * File path to save the screencast to.
      */
-    path?: `${string}.${FileFormat}`;
+    path?: `${string}.${VideoFormat}`;
+    /**
+     * Specifies whether to overwrite output file,
+     * or exit immediately if it already exists.
+     *
+     * @defaultValue `true`
+     */
+    overwrite?: boolean;
     /**
      * Specifies the output file format.
      *
-     * @defaultValue `webm`
+     * @defaultValue `'webm'`
      */
-    format?: FileFormat;
+    format?: VideoFormat;
     /**
      * Specifies the region of the viewport to crop.
      */
@@ -7345,6 +7392,8 @@ export declare interface ScreencastOptions {
      * Path to the {@link https://ffmpeg.org/ | ffmpeg}.
      *
      * Required if `ffmpeg` is not in your PATH.
+     *
+     * @defaultValue `'ffmpeg'`
      */
     ffmpegPath?: string;
 }
@@ -7385,7 +7434,7 @@ export declare interface ScreenshotOptions {
     /**
      * @defaultValue `'png'`
      */
-    type?: 'png' | 'jpeg' | 'webp';
+    type?: ImageFormat;
     /**
      * Quality of the image, between 0-100. Not applicable to `png` images.
      */
@@ -7414,7 +7463,7 @@ export declare interface ScreenshotOptions {
      * relative to current working directory. If no path is provided, the image
      * won't be saved to the disk.
      */
-    path?: string;
+    path?: `${string}.${ImageFormat}`;
     /**
      * Specifies the region of the page/element to clip.
      */
@@ -7803,6 +7852,11 @@ export declare interface TracingOptions {
  */
 export declare class UnsupportedOperation extends PuppeteerError {
 }
+
+/**
+ * @public
+ */
+export declare type VideoFormat = 'webm' | 'gif' | 'mp4';
 
 /**
  * @license

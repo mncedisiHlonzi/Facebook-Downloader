@@ -94,8 +94,8 @@ ion-input {
 .download-item ion-thumbnail {
   border-radius: 8px;
   overflow: hidden;
-  height: 110px;
-  width: 110px;
+  height: 115px; 
+  width: 115px;
 }
 .download-item ion-label {
   margin-left: 10px;
@@ -186,12 +186,13 @@ ion-item{
   --background: var(--plug-card-bg);
 }
 .download-card ion-label h3{
-  font-size: 0.8rem;
+  font-size: 0.7rem;
   font-weight: 700;
   color: #000;
+  margin-top: 6px;
 }
 .download-card ion-label p{
-  font-size: 0.7rem;
+  font-size: 0.6rem;
   font-weight: 400;
   color: #000;
 }
@@ -278,9 +279,66 @@ ion-item-option:active {
 
 //
 /* In your SCSS (home.page.scss) */
-.player-title{
-  color: #000;
-  font-size: 0.8rem !important;
+/* Status bar styling for video modal */
+ion-modal {
+  /* For iOS */
+  .ios.status-bar-black {
+    --ion-statusbar-background: #000000;
+  }
+  
+  /* For Android */
+  .md.status-bar-black {
+    --ion-statusbar-background: #000000;
+  }
+}
+
+video {
+  width: 100%;
+  height: auto;
+  background: black; /* avoid grey screen before loading */
+}
+
+
+/* Ensure content doesn't go under status bar */
+.player-content {
+  --offset-top: constant(safe-area-inset-top); /* iOS 11.0 */
+  --offset-top: env(safe-area-inset-top); /* iOS 11.2 */
+  padding-top: var(--offset-top, 0);
+}
+
+.player-header {
+  padding-top: constant(safe-area-inset-top); /* iOS 11.0 */
+  padding-top: env(safe-area-inset-top); /* iOS 11.2 */
+  
+  ion-toolbar {
+    padding-top: constant(safe-area-inset-top); /* iOS 11.0 */
+    padding-top: env(safe-area-inset-top); /* iOS 11.2 */
+    min-height: calc(56px + constant(safe-area-inset-top)); /* iOS 11.0 */
+    min-height: calc(56px + env(safe-area-inset-top)); /* iOS 11.2 */
+  }
+}
+.player-header {
+  --background: #000000;
+  --color: #ffffff;
+  
+  ion-toolbar {
+    --background: #000000;
+    --color: #ffffff;
+    
+    ion-button {
+      --color: #ffffff;
+      
+      ion-icon {
+        color: #ffffff;
+      }
+    }
+    
+    ion-title {
+      color: #ffffff;
+      font-size: 0.9rem;
+      font-weight: 500;
+    }
+  }
 }
 .player-content {
   --background: #000;
@@ -386,45 +444,184 @@ video::-webkit-media-controls {
 
 
 
-
-
-
-.completed-video-card {
-  //margin: 10px;
-  border-radius: 10px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-  transition: transform 0.3s ease;
+.video-spinner-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 10;
+  
+  .spinner-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+    
+    .video-spinner {
+      --color: var(--ion-color-primary);
+      width: 48px;
+      height: 48px;
+    }
+    
+    .spinner-text {
+      color: white;
+      font-size: 14px;
+      margin: 0;
+      opacity: 0.8;
+    }
+  }
 }
 
-.completed-video-card:hover {
-  transform: scale(1.02);
-}
 
-.completed-video-card ion-thumbnail{
-  margin-top: 14px;
-  margin-bottom: 14px;
-}
-
-.completed-video-card ion-thumbnail img {
-  border-radius: 8px;
-}
-
-.completed-video-card h3 {
-  font-size: 0.8rem;
-  font-weight: 700;
-  color: #000;
-  margin-bottom: 8px;
-  margin-top: 6px;
-}
-
-.completed-video-card p {
-  font-size: 0.7rem;
-  font-weight: 400;
-  color: #333;
-}
-/*
+.downloaded_videos_card {
+  --background: var(--ion-bg-color);
+  margin-bottom: 5px;
+  margin-top: 5px;
+  //border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  
+  ion-label {
+    cursor: pointer;
+    
+    .videoName {
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: #000;
+      margin-bottom: 4px;
+      margin-top: 0;
+    }
+    
+    .video-meta {
+      font-size: 0.75rem;
+      margin-top: 12px;
+      font-weight: 400;
+      color: #666;
+    }
+  }
+  
+  .action-button {
+    --padding-start: 8px;
+    --padding-end: 8px;
+    margin: 0 2px;
+    
+    ion-icon {
+      font-size: 30px;
+    }
+  }
+}/*
 
 .downloaded_videos_card .videoName {
   margin-bottom: 8px;
   margin-top: 6px;
 }*/
+
+.completed-thumbnail {
+  position: relative;
+  margin-left: 10px;
+  cursor: pointer;
+  
+  .play-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    transition: background-color 0.2s ease;
+    
+    .play-icon {
+      font-size: 32px;
+      color: white;
+      opacity: 0.9;
+      transition: transform 0.2s ease;
+    }
+  }
+  
+  &:active .play-overlay {
+    background: rgba(0, 0, 0, 0.5);
+    
+    .play-icon {
+      transform: scale(0.95);
+    }
+  }
+}
+
+.history-thumbnail {
+  position: relative;
+  width: 70px;
+  height: 70px;
+  
+  .film-icon-overlay {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    background: rgba(0, 0, 0, 0);
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    
+    .film-icon {
+      font-size: 30px;
+      color: white;
+    }
+  }
+}
+
+.completed-video-card {
+  position: fixed;
+  bottom: 20px;
+  align-items: center;
+  width: 95%;
+  max-width: 500px;
+  z-index: 1000;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  
+  ion-item {
+    --padding-start: 8px;
+    --padding-end: 8px;
+    --padding-top: 8px;
+    --padding-bottom: 8px;
+    
+    ion-thumbnail {
+      width: 60px;
+      height: 60px;
+      margin-right: 12px;
+    }
+    
+    ion-label {
+      h3 {
+        font-size: 0.9rem;
+        font-weight: 600;
+        margin-bottom: 10px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      
+      p {
+        font-size: 0.8rem;
+        color: var(--ion-color-medium);
+        margin: 0;
+      }
+    }
+    
+    ion-button {
+      --padding-start: 6px;
+      --padding-end: 6px;
+      margin: 0 2px;
+    }
+  }
+}

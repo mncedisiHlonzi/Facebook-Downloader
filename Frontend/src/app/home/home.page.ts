@@ -5,9 +5,11 @@ import { ToastController, AlertController, LoadingController } from '@ionic/angu
 import { HttpClient } from '@angular/common/http';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { NgZone } from '@angular/core';
+import { Share } from '@capacitor/share';
 import { DomSanitizer, SafeResourceUrl } from '@angular/platform-browser';
 import { trigger, state, style, transition, animate } from '@angular/animations';
 import { Capacitor } from '@capacitor/core';
+import { StatusBar, Style } from '@capacitor/status-bar';
 
 interface DownloadItem {
   id: number;
@@ -72,6 +74,7 @@ export class HomePage implements OnDestroy {
   controlsTimeout: any;
   isFullscreen: boolean = false;
   completedVideo: DownloadItem | null = null;
+  isVideoLoading: boolean = false;
 
   private fullscreenChangeHandler = () => this.checkFullscreen();
 
@@ -119,70 +122,77 @@ export class HomePage implements OnDestroy {
 
   // Video Player Controls
   private setupVideoPlayer() {
-    const video = this.videoPlayerRef?.nativeElement;
-    if (!video) return;
+  const video = this.videoPlayerRef?.nativeElement;
+  if (!video) return;
 
-    document.addEventListener('fullscreenchange', this.fullscreenChangeHandler);
-    document.addEventListener('webkitfullscreenchange', this.fullscreenChangeHandler);
+  document.addEventListener('fullscreenchange', this.fullscreenChangeHandler);
+  document.addEventListener('webkitfullscreenchange', this.fullscreenChangeHandler);
 
-    video.onplay = () => {
+  // Remove poster attribute to prevent overlay
+  video.removeAttribute('poster');
+  
+  video.onplay = () => {
+    this.isPlaying = true;
+    this.showControlsTemporarily();
+  };
+
+  video.onpause = () => {
+    this.isPlaying = false;
+    this.showCustomControls = true;
+    clearTimeout(this.controlsTimeout);
+  };
+
+  video.ontimeupdate = () => {
+    this.currentTime = video.currentTime;
+    this.duration = video.duration || 0;
+    this.videoProgress = (video.currentTime / video.duration) * 100 || 0;
+  };
+
+  video.onended = () => {
+    this.isPlaying = false;
+    this.showCustomControls = true;
+    this.presentToast('Video finished playing', 'medium');
+  };
+
+  video.onclick = (e) => {
+    e.stopPropagation();
+    this.togglePlay();
+  };
+
+  video.onvolumechange = () => {
+    this.isMuted = video.muted;
+  };
+
+  // Remove oncanplay auto-play logic that might cause overlay
+  video.oncanplay = () => {
+    // Just ensure the video is ready, don't auto-play
+    console.log('Video ready to play');
+  };
+
+  // Prevent right-click context menu
+  video.oncontextmenu = (e) => {
+    e.preventDefault();
+    return false;
+  };
+}
+
+// Updated togglePlay method
+togglePlay() {
+  const video = this.videoPlayerRef?.nativeElement;
+  if (!video) return;
+
+  if (video.paused) {
+    video.play().then(() => {
       this.isPlaying = true;
       this.showControlsTemporarily();
-    };
-
-    video.onpause = () => {
-      this.isPlaying = false;
-      this.showCustomControls = true;
-      clearTimeout(this.controlsTimeout);
-    };
-
-    video.ontimeupdate = () => {
-      this.currentTime = video.currentTime;
-      this.duration = video.duration || 0;
-      this.videoProgress = (video.currentTime / video.duration) * 100 || 0;
-    };
-
-    video.onended = () => {
-      this.isPlaying = false;
-      this.showCustomControls = true;
-      this.presentToast('Video finished playing', 'medium');
-    };
-
-    video.onclick = (e) => {
-      e.stopPropagation();
-      this.togglePlay();
-    };
-
-    video.onvolumechange = () => {
-      this.isMuted = video.muted;
-    };
-
-    video.oncanplay = () => {
-      if (!this.isPlaying) {
-        video.play().catch(e => {
-          console.warn('Autoplay blocked:', e);
-          this.showCustomControls = true;
-        });
-      }
-    };
+    }).catch(e => {
+      this.presentToast('Could not play video', 'warning');
+    });
+  } else {
+    video.pause();
+    this.isPlaying = false;
   }
-
-  togglePlay() {
-    const video = this.videoPlayerRef?.nativeElement;
-    if (!video) return;
-
-    if (video.paused) {
-      video.play().then(() => {
-        this.isPlaying = true;
-        this.showControlsTemporarily();
-      }).catch(e => {
-        this.presentToast('Could not play video', 'warning');
-      });
-    } else {
-      video.pause();
-      this.isPlaying = false;
-    }
-  }
+}
 
   toggleMute() {
     const video = this.videoPlayerRef?.nativeElement;
@@ -255,87 +265,145 @@ export class HomePage implements OnDestroy {
 
   // Video Playback
   async playDownloadedVideo(video: DownloadItem) {
-    if (this.isOpeningVideo) return;
-    this.isOpeningVideo = true;
-    
-    const loading = await this.loadingCtrl.create({
-      message: 'Preparing your video...',
-      spinner: 'circles',
-      cssClass: 'video-loading'
-    });
-    await loading.present();
-  
+  if (this.isOpeningVideo) return;
+  this.isOpeningVideo = true;
+
+  // Set status bar to dark style
+  if (this.isNativePlatform) {
     try {
-      let videoUrl: string;
-  
-      if (this.isNativePlatform && video.fileUri) {
-        videoUrl = Capacitor.convertFileSrc(video.fileUri);
-      } else if (video.videoData) {
-        const blob = this.b64toBlob(video.videoData, 'video/mp4');
-        videoUrl = URL.createObjectURL(blob);
-      } else {
-        throw new Error('No playable video source');
-      }
-  
-      this.currentPlayingVideo = this.sanitizer.bypassSecurityTrustResourceUrl(videoUrl);
-      this.currentPlayingVideoName = video.name.replace('.mp4', '');
-      this.isVideoModalOpen = true;
-      
-      setTimeout(() => {
-        const videoElement = this.videoPlayerRef?.nativeElement;
-        if (!videoElement) return;
-  
-        this.setupVideoPlayer();
-        
-        // Set initial volume state (unmuted)
-        videoElement.muted = false;
-        this.isMuted = false;
-        
-        // Try autoplay with sound
-        const playPromise = videoElement.play();
-        
-        if (playPromise !== undefined) {
-          playPromise.catch(error => {
-            // If autoplay with sound fails, try muted autoplay
-            console.log('Autoplay with sound failed, trying muted:', error);
-            videoElement.muted = true;
-            this.isMuted = true;
-            videoElement.play()
-              .then(() => {
-                // Show unmute button if we had to fallback to muted
-                this.showCustomControls = true;
-              })
-              .catch(e => console.log('Muted autoplay also failed:', e));
-          });
-        }
-      }, 300);
-      
-      this.presentToast('Video is ready', 'success');
-      
+      await StatusBar.setStyle({ style: Style.Dark });
+      await StatusBar.setBackgroundColor({ color: '#000000' });
     } catch (error) {
-      console.error('Playback error:', error);
-      this.presentToast('Could not play this video', 'danger');
-    } finally {
-      this.isOpeningVideo = false;
-      await loading.dismiss();
+      console.error('Status bar error:', error);
     }
   }
 
-  closeVideoPlayer() {
-    if (this.isFullscreen) {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-      } else if ((document as any).webkitExitFullscreen) {
-        (document as any).webkitExitFullscreen();
-      }
+  try {
+    let videoUrl: string;
+
+    if (this.isNativePlatform && video.fileUri) {
+      videoUrl = Capacitor.convertFileSrc(video.fileUri);
+    } else if (video.videoData) {
+      const blob = this.b64toBlob(video.videoData, 'video/mp4');
+      videoUrl = URL.createObjectURL(blob);
+    } else {
+      throw new Error('No playable video source');
     }
+
+    this.currentPlayingVideo = this.sanitizer.bypassSecurityTrustResourceUrl(videoUrl);
+    this.currentPlayingVideoName = video.name.replace('.mp4', '');
     
-    this.isVideoModalOpen = false;
-    this.currentPlayingVideo = null;
-    this.currentPlayingVideoName = '';
-    this.isPlaying = false;
-    clearTimeout(this.controlsTimeout);
+    // Show spinner overlay immediately
+    this.isVideoLoading = true;
+    this.isVideoModalOpen = true;
+
+    // Wait for modal to be fully open
+    setTimeout(() => {
+      const videoElement = this.videoPlayerRef?.nativeElement;
+      if (!videoElement) {
+        this.isVideoLoading = false;
+        return;
+      }
+
+      this.setupVideoPlayer();
+
+      // Set initial video properties
+      videoElement.muted = true;
+      videoElement.preload = 'metadata';
+      videoElement.poster = '';
+      videoElement.controls = false;
+      
+      // Reset states
+      this.isMuted = true;
+      this.showCustomControls = false; // Hide controls until video starts
+      this.isPlaying = false;
+      this.currentTime = 0;
+      this.duration = 0;
+      this.videoProgress = 0;
+
+      // Load the video
+      videoElement.load();
+
+      // When video starts playing (duration counting begins)
+      videoElement.ontimeupdate = () => {
+        this.currentTime = videoElement.currentTime;
+        this.duration = videoElement.duration || 0;
+        this.videoProgress = (videoElement.currentTime / videoElement.duration) * 100 || 0;
+        
+        // Hide spinner when time starts counting
+        if (this.currentTime > 0 && this.isVideoLoading) {
+          this.ngZone.run(() => {
+            this.isVideoLoading = false;
+            this.showCustomControls = true;
+            this.showControlsTemporarily();
+          });
+        }
+      };
+
+      // Auto-play when ready
+      videoElement.oncanplay = async () => {
+        try {
+          await videoElement.play();
+          this.isPlaying = true;
+        } catch (error) {
+          console.log('Autoplay failed:', error);
+          // Hide spinner even if autoplay fails
+          this.ngZone.run(() => {
+            this.isVideoLoading = false;
+            this.showCustomControls = true;
+          });
+        }
+      };
+
+      // Fallback timeout to hide spinner
+      setTimeout(() => {
+        if (this.isVideoLoading) {
+          this.ngZone.run(() => {
+            this.isVideoLoading = false;
+            this.showCustomControls = true;
+          });
+        }
+      }, 8000);
+
+    }, 100);
+
+  } catch (error) {
+    console.error('Playback error:', error);
+    this.isVideoLoading = false;
+    this.presentToast('Could not play this video', 'danger');
+  } finally {
+    this.isOpeningVideo = false;
   }
+}
+
+
+  async closeVideoPlayer() {
+  if (this.isFullscreen) {
+    if (document.exitFullscreen) {
+      document.exitFullscreen();
+    } else if ((document as any).webkitExitFullscreen) {
+      (document as any).webkitExitFullscreen();
+    }
+  }
+  
+  // Revert status bar to default style
+  if (this.isNativePlatform) {
+    try {
+      // Set back to light style (or your app's default)
+      await StatusBar.setStyle({ style: Style.Light });
+      // Revert background color if needed
+      await StatusBar.setBackgroundColor({ color: '#f0f0f0' });
+    } catch (error) {
+      console.error('Status bar error:', error);
+    }
+  }
+  
+  this.isVideoModalOpen = false;
+  this.currentPlayingVideo = null;
+  this.currentPlayingVideoName = '';
+  this.isPlaying = false;
+  clearTimeout(this.controlsTimeout);
+}
 
   // Clipboard and Download
   async checkClipboard() {
@@ -382,14 +450,14 @@ export class HomePage implements OnDestroy {
   async fetchVideoData(url: string) {
     const loading = await this.loadingCtrl.create({ 
       message: 'Getting your video ready...',
-      spinner: 'circles',
+      spinner: 'circular',
       cssClass: 'custom-loading'
     });
     await loading.present();
   
     this.presentToast('Looking for your video...', 'medium', 2000);
   
-    this.http.post<any>('http://172.168.161.212:3000/fetch-fb-video-data', { url }).subscribe({
+    this.http.post<any>('http://100.76.48.6:3000/fetch-fb-video-data', { url }).subscribe({
       next: async (response) => {
         await loading.dismiss();
   
@@ -461,7 +529,7 @@ export class HomePage implements OnDestroy {
   
     const loading = await this.loadingCtrl.create({
       message: 'Starting your download...',
-      spinner: 'circles',
+      spinner: 'circular',
       cssClass: 'download-loading'
     });
     await loading.present();
@@ -652,6 +720,123 @@ export class HomePage implements OnDestroy {
   closeDownloadCard() {
     this.completedVideo = null; // Clear the completed video
   }
+
+  async shareVideo(video: DownloadItem) {
+  try {
+    if (!Capacitor.isNativePlatform()) {
+      // Web fallback - use Web Share API if available
+      if (navigator.share && video.videoData) {
+        const blob = this.b64toBlob(video.videoData, 'video/mp4');
+        const file = new File([blob], video.name, { type: 'video/mp4' });
+        
+        await navigator.share({
+          title: 'Check out this video!',
+          text: `Downloaded from Facebook: ${video.name}`,
+          files: [file]
+        });
+        
+        this.presentToast('Video shared successfully!', 'success');
+        return;
+      } else {
+        // Fallback for browsers without Web Share API
+        this.presentToast('Sharing not supported on this browser', 'warning');
+        return;
+      }
+    }
+
+    // Native platform sharing
+    let shareOptions: any = {
+      title: 'Check out this video!',
+      text: `Downloaded from Facebook: ${video.name.replace('.mp4', '')}`,
+      dialogTitle: 'Share Video'
+    };
+
+    // For native platforms, share the actual video file
+    if (video.fileUri) {
+      shareOptions.url = video.fileUri;
+    } else if (video.videoData) {
+      // If we only have base64 data, we need to write it to a temporary file first
+      const tempFileName = `temp_share_${Date.now()}.mp4`;
+      const tempPath = `Download/Facebook_Download/${tempFileName}`;
+      
+      try {
+        await Filesystem.writeFile({
+          path: tempPath,
+          data: video.videoData.split(',')[1], // Remove data URL prefix
+          directory: Directory.ExternalStorage
+        });
+
+        const tempUri = await Filesystem.getUri({
+          path: tempPath,
+          directory: Directory.ExternalStorage
+        });
+
+        shareOptions.url = tempUri.uri;
+        
+        // Clean up temp file after sharing
+        setTimeout(async () => {
+          try {
+            await Filesystem.deleteFile({
+              path: tempPath,
+              directory: Directory.ExternalStorage
+            });
+          } catch (error) {
+            console.error('Failed to delete temp file:', error);
+          }
+        }, 5000);
+        
+      } catch (error) {
+        console.error('Failed to create temp file for sharing:', error);
+        this.presentToast('Could not prepare video for sharing', 'danger');
+        return;
+      }
+    }
+
+    await Share.share(shareOptions);
+    this.presentToast('Video shared successfully!', 'success');
+    
+  } catch (error) {
+    console.error('Share error:', error);
+    if (error instanceof Error && error.message !== 'Share canceled') {
+      this.presentToast('Sharing failed - please try again', 'danger');
+    }
+  }
+}
+
+// Alternative method for sharing with custom app selection
+async shareVideoWithOptions(video: DownloadItem) {
+  const alert = await this.alertController.create({
+    header: 'Share Video',
+    message: 'Choose how to share this video',
+    buttons: [
+      {
+        text: 'WhatsApp',
+        handler: () => this.shareToSpecificApp(video, 'whatsapp')
+      },
+      {
+        text: 'Telegram',
+        handler: () => this.shareToSpecificApp(video, 'telegram')
+      },
+      {
+        text: 'Other Apps',
+        handler: () => this.shareVideo(video)
+      },
+      {
+        text: 'Cancel',
+        role: 'cancel'
+      }
+    ],
+    cssClass: 'share-alert'
+  });
+  
+  await alert.present();
+}
+
+private async shareToSpecificApp(video: DownloadItem, app: string) {
+  // This would require additional setup for specific app sharing
+  // For now, fall back to general sharing
+  await this.shareVideo(video);
+}
 
   private async downloadForWeb(downloadItem: DownloadItem) {
     const response = await fetch(downloadItem.videoUrl!);
@@ -950,7 +1135,7 @@ export class HomePage implements OnDestroy {
           handler: async () => {
             const loading = await this.loadingCtrl.create({
               message: 'Removing video...',
-              spinner: 'circles',
+              spinner: 'circular',
               duration: 1000,
               cssClass: 'delete-loading'
             });
