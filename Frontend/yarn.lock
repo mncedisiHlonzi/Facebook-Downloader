@@ -1180,10 +1180,10 @@
   resolved "https://registry.npmjs.org/@capacitor/app/-/app-7.0.1.tgz"
   integrity sha512-ArlVZAAla4MwQoKh26x2AaTDOBh5Vhp1VhMKR3RwqZSsZnazKTFGNrPbr9Ez5r1knnEDfApyjwp1uZnXK1WTYQ==
 
-"@capacitor/background-runner@^2.1.0":
-  version "2.1.0"
-  resolved "https://registry.npmjs.org/@capacitor/background-runner/-/background-runner-2.1.0.tgz"
-  integrity sha512-5ezvBeZVOaMC1sqDgD5gvCC4RYarEA47k29fAKti+mr2B9VvTp9yjeirMxjPJHvM247z1QNDTgAvEk4KmClE4Q==
+"@capacitor/background-runner@^3.0.0":
+  version "3.0.0"
+  resolved "https://registry.yarnpkg.com/@capacitor/background-runner/-/background-runner-3.0.0.tgz#79cf28c70bc4299cde54a9851ddabfd23e892ae6"
+  integrity sha512-BSUypHc9P7p8A8O7a686ifzUWq6W03n384C+WVpUrXHvwZdtpvm7gJO3NIXACb9mvYuKv+bh4CYv7YfB4rBIcg==
 
 "@capacitor/cli@6":
   version "6.2.1"
