@@ -33,8 +33,11 @@ router.post('/fetch-fb-video-data', async (req, res) => {
         '--disable-dev-shm-usage',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding'
-      ]
+        '--disable-renderer-backgrounding',
+        '--single-process', // Important for Railway memory constraints
+        '--no-zygote'
+      ],
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath() // Railway might have a custom path
     });
     
     const page = await browser.newPage();
