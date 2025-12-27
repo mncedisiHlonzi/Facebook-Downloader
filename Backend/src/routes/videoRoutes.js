@@ -19,6 +19,8 @@ router.post('/fetch-fb-video-data', async (req, res) => {
   }
 
   let browser;
+  let page;
+  
   try {
     browser = await puppeteer.launch({
       headless: 'new',
@@ -30,10 +32,9 @@ router.post('/fetch-fb-video-data', async (req, res) => {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process', // Important for Railway/limited memory environments
         '--disable-gpu',
         '--disable-web-security',
-        '--disable-features=VizDisplayCompositor',
+        '--disable-features=IsolateOrigins,site-per-process,VizDisplayCompositor',
         '--disable-blink-features=AutomationControlled',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
@@ -41,12 +42,19 @@ router.post('/fetch-fb-video-data', async (req, res) => {
         '--disable-extensions',
         '--disable-software-rasterizer',
         '--disable-translate',
-        '--mute-audio'
-      ]
+        '--disable-site-isolation-trials',
+        '--mute-audio',
+        '--window-size=375,667'
+      ],
+      ignoreHTTPSErrors: true,
+      protocolTimeout: 180000
     });
 
+    page = await browser.newPage();
     
-    const page = await browser.newPage();
+    // Set longer timeouts
+    page.setDefaultTimeout(60000);
+    page.setDefaultNavigationTimeout(60000);
     
     // Enhanced stealth measures
     await page.evaluateOnNewDocument(() => {
@@ -65,99 +73,102 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       audios: [],
       targetVideoFound: false,
       mainVideoInteractionTime: null,
-      allVideoStreams: [] // Track all streams with metadata
+      allVideoStreams: []
     };
 
     const postId = extractPostId(url);
     console.log(`Target post ID: ${postId}`);
 
-    await page.setRequestInterception(true);
+    // Helper function to setup page handlers
+    const setupPageHandlers = (currentPage) => {
+      currentPage.on('request', (request) => {
+        const resourceType = request.resourceType();
+        const requestUrl = request.url();
+        
+        if (['document', 'xhr', 'fetch'].includes(resourceType) || 
+            requestUrl.includes('video') || 
+            requestUrl.includes('audio') ||
+            requestUrl.includes('.mp4')) {
+          request.continue();
+        } else if (['image', 'stylesheet', 'font', 'other'].includes(resourceType)) {
+          request.abort();
+        } else {
+          request.continue();
+        }
+      });
 
-    page.on('request', (request) => {
-      const resourceType = request.resourceType();
-      const requestUrl = request.url();
-      
-      if (['document', 'xhr', 'fetch'].includes(resourceType) || 
-          requestUrl.includes('video') || 
-          requestUrl.includes('audio') ||
-          requestUrl.includes('.mp4')) {
-        request.continue();
-      } else if (['image', 'stylesheet', 'font', 'other'].includes(resourceType)) {
-        request.abort();
-      } else {
-        request.continue();
-      }
-    });
+      currentPage.on('response', async (response) => {
+        try {
+          const responseUrl = response.url();
+          const headers = response.headers();
+          const contentType = headers['content-type'] || '';
+          const contentLength = parseInt(headers['content-length'] || '0');
 
-    page.on('response', async (response) => {
-      try {
-        const responseUrl = response.url();
-        const headers = response.headers();
-        const contentType = headers['content-type'] || '';
-        const contentLength = parseInt(headers['content-length'] || '0');
+          if (contentType.includes('video/mp4') || 
+              contentType.includes('video/') ||
+              responseUrl.includes('.mp4') ||
+              responseUrl.includes('video_dashinit')) {
+            
+            const quality = extractQualityImproved(responseUrl);
+            const bitrate = extractBitrate(responseUrl);
+            const isTarget = checkIfTargetStream(responseUrl, postId);
+            
+            const streamData = {
+              url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
+              quality: quality,
+              bitrate: bitrate,
+              contentLength: contentLength,
+              isTarget: isTarget,
+              timestamp: Date.now(),
+              responseOrder: streams.allVideoStreams.length,
+              isDash: responseUrl.includes('dash'),
+              isProgressive: responseUrl.includes('progressive')
+            };
+            
+            streams.allVideoStreams.push(streamData);
+            
+            if (quality || isTarget) {
+              const qualityKey = quality || 'unknown';
+              if (!streams.videos.has(qualityKey) || streams.videos.get(qualityKey).bitrate < bitrate) {
+                streams.videos.set(qualityKey, streamData);
+              }
+            }
+            
+            if (isTarget) {
+              streams.targetVideoFound = true;
+            }
+            
+            console.log(`Found video stream: ${quality || 'unknown'}p - Bitrate: ${bitrate} - Target: ${isTarget} - Progressive: ${streamData.isProgressive} - Size: ${contentLength}`);
+          }
 
-        if (contentType.includes('video/mp4') || 
-            contentType.includes('video/') ||
-            responseUrl.includes('.mp4') ||
-            responseUrl.includes('video_dashinit')) {
-          
-          const quality = extractQualityImproved(responseUrl);
-          const bitrate = extractBitrate(responseUrl);
-          const isTarget = checkIfTargetStream(responseUrl, postId);
-          
-          const streamData = {
-            url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
-            quality: quality,
-            bitrate: bitrate,
-            contentLength: contentLength,
-            isTarget: isTarget,
-            timestamp: Date.now(),
-            responseOrder: streams.allVideoStreams.length,
-            isDash: responseUrl.includes('dash'),
-            isProgressive: responseUrl.includes('progressive')
-          };
-          
-          streams.allVideoStreams.push(streamData);
-          
-          // Only store if we can determine quality or if it's a target stream
-          if (quality || isTarget) {
-            const qualityKey = quality || 'unknown';
-            if (!streams.videos.has(qualityKey) || streams.videos.get(qualityKey).bitrate < bitrate) {
-              streams.videos.set(qualityKey, streamData);
+          if (contentType.includes('audio/mp4') || 
+              contentType.includes('audio/') ||
+              responseUrl.includes('audio_dashinit')) {
+            
+            const isTarget = checkIfTargetStream(responseUrl, postId);
+            const bitrate = extractBitrate(responseUrl);
+            
+            const audioData = {
+              url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
+              isTarget: isTarget,
+              bitrate: bitrate,
+              timestamp: Date.now(),
+              responseOrder: streams.audios.length
+            };
+            
+            if (!streams.audios.find(a => a.url === audioData.url)) {
+              streams.audios.push(audioData);
+              console.log(`Found audio stream: Target: ${isTarget} - Bitrate: ${bitrate}`);
             }
           }
-          
-          if (isTarget) {
-            streams.targetVideoFound = true;
-          }
-          
-          console.log(`Found video stream: ${quality || 'unknown'}p - Bitrate: ${bitrate} - Target: ${isTarget} - Progressive: ${streamData.isProgressive} - Size: ${contentLength}`);
+        } catch (err) {
+          console.error('Response handler error:', err);
         }
+      });
+    };
 
-        if (contentType.includes('audio/mp4') || 
-            contentType.includes('audio/') ||
-            responseUrl.includes('audio_dashinit')) {
-          
-          const isTarget = checkIfTargetStream(responseUrl, postId);
-          const bitrate = extractBitrate(responseUrl);
-          
-          const audioData = {
-            url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
-            isTarget: isTarget,
-            bitrate: bitrate,
-            timestamp: Date.now(),
-            responseOrder: streams.audios.length
-          };
-          
-          if (!streams.audios.find(a => a.url === audioData.url)) {
-            streams.audios.push(audioData);
-            console.log(`Found audio stream: Target: ${isTarget} - Bitrate: ${bitrate}`);
-          }
-        }
-      } catch (err) {
-        console.error('Response handler error:', err);
-      }
-    });
+    await page.setRequestInterception(true);
+    setupPageHandlers(page);
 
     await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1');
     
@@ -174,9 +185,9 @@ router.post('/fetch-fb-video-data', async (req, res) => {
     });
 
     const urlsToTry = [
+      url,
       convertToMobileUrl(url),
-      convertToDesktopUrl(url),
-      url
+      convertToDesktopUrl(url)
     ];
 
     let pageLoaded = false;
@@ -185,32 +196,112 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       try {
         console.log(`Trying URL: ${testUrl}`);
         
-        await page.goto(testUrl, {
-          waitUntil: 'networkidle2',
-          timeout: 30000
+        const response = await page.goto(testUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 45000
         });
 
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        if (!response || response.status() === 404) {
+          console.log(`Got 404 or no response for ${testUrl}`);
+          continue;
+        }
 
-        const hasVideo = await page.evaluate(() => {
-          return document.querySelectorAll('video').length > 0 || 
-                 document.querySelector('[data-testid*="video"]') !== null ||
-                 document.querySelector('.videoStage') !== null;
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        const pageCheck = await page.evaluate(() => {
+          const bodyText = document.body.innerText.toLowerCase();
+          const isLoginPage = bodyText.includes('log in to facebook') || 
+                             bodyText.includes('sign up for facebook') ||
+                             document.querySelector('input[name="email"]') !== null;
+          const isErrorPage = bodyText.includes('content not found') ||
+                             bodyText.includes('this content isn\'t available') ||
+                             bodyText.includes('page not found');
+          
+          return {
+            isLoginPage,
+            isErrorPage,
+            hasVideo: document.querySelectorAll('video').length > 0 || 
+                     document.querySelector('[data-testid*="video"]') !== null ||
+                     document.querySelector('.videoStage') !== null,
+            url: window.location.href
+          };
         });
 
-        if (hasVideo) {
+        console.log('Page check:', pageCheck);
+
+        if (pageCheck.isLoginPage) {
+          console.log('Detected login page, trying next URL...');
+          continue;
+        }
+
+        if (pageCheck.isErrorPage) {
+          console.log('Detected error page, trying next URL...');
+          continue;
+        }
+
+        if (pageCheck.hasVideo) {
           console.log(`Successfully loaded video page with URL: ${testUrl}`);
           pageLoaded = true;
           break;
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          
+          const recheckVideo = await page.evaluate(() => {
+            return document.querySelectorAll('video').length > 0;
+          });
+          
+          if (recheckVideo) {
+            console.log(`Video found after additional wait: ${testUrl}`);
+            pageLoaded = true;
+            break;
+          }
         }
       } catch (error) {
         console.log(`Failed to load ${testUrl}:`, error.message);
+        
+        if (error.message.includes('detached')) {
+          console.log('Frame detached, creating new page...');
+          try {
+            await page.close();
+          } catch (e) {}
+          
+          page = await browser.newPage();
+          page.setDefaultTimeout(60000);
+          page.setDefaultNavigationTimeout(60000);
+          
+          await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            delete window.chrome;
+            window.chrome = { runtime: {} };
+          });
+
+          await page.setViewport({ width: 375, height: 667 });
+          await page.setRequestInterception(true);
+          setupPageHandlers(page);
+
+          await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1');
+          
+          await page.setExtraHTTPHeaders({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none'
+          });
+        }
+        
         continue;
       }
     }
 
     if (!pageLoaded) {
-      throw new Error('Could not load video page with any URL variant');
+      throw new Error('Could not load video page with any URL variant. The video may be private, deleted, or require login.');
     }
 
     // Enhanced video interaction with quality triggering
@@ -287,14 +378,11 @@ router.post('/fetch-fb-video-data', async (req, res) => {
           targetVideo.scrollIntoView({ behavior: 'smooth', block: 'center' });
           targetVideo.setAttribute('data-target-video', 'true');
           
-          // More aggressive interaction to trigger higher quality streams
           setTimeout(() => {
             try {
-              // Try multiple interaction methods to trigger HD streams
               targetVideo.play().catch(() => {});
               targetVideo.click();
               
-              // Try to trigger fullscreen which often loads higher quality
               if (targetVideo.requestFullscreen) {
                 targetVideo.requestFullscreen().then(() => {
                   setTimeout(() => {
@@ -303,7 +391,6 @@ router.post('/fetch-fb-video-data', async (req, res) => {
                 }).catch(() => {});
               }
               
-              // Simulate user seeking to trigger quality adaptation
               targetVideo.currentTime = Math.min(5, targetVideo.duration * 0.1);
               
               const container = targetVideo.closest('div[data-pagelet]') || 
@@ -317,7 +404,6 @@ router.post('/fetch-fb-video-data', async (req, res) => {
                   }
                 });
                 
-                // Look for quality/settings buttons
                 const qualityButtons = container.querySelectorAll('[aria-label*="quality"], [aria-label*="HD"], [data-testid*="quality"]');
                 qualityButtons.forEach(button => {
                   if (button.offsetParent !== null) {
@@ -350,14 +436,12 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       
       streams.mainVideoInteractionTime = Date.now();
       
-      // Wait longer for higher quality streams to load
       await new Promise(resolve => setTimeout(resolve, 12000));
       
     } catch (err) {
       console.log('Could not interact with video elements:', err.message);
     }
 
-    // Wait for all streams to load
     await new Promise(resolve => setTimeout(resolve, 10000));
 
     const metadata = await page.evaluate(() => {
@@ -394,7 +478,6 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       contentLength: s.contentLength
     })));
 
-    // Improved stream selection logic
     let bestVideoEntry = selectBestVideoStream(streams, postId);
     let bestAudioUrl = selectBestAudioStream(streams, postId);
 
@@ -408,7 +491,6 @@ router.post('/fetch-fb-video-data', async (req, res) => {
         scripts.forEach(script => {
           const content = script.textContent || '';
           
-          // Enhanced pattern matching for video URLs
           const patterns = [
             /https:\/\/[^"]*\.mp4[^"]*/g,
             /https:\/\/[^"]*video[^"]*\.mp4[^"]*/g,
@@ -427,15 +509,11 @@ router.post('/fetch-fb-video-data', async (req, res) => {
                 }
                 
                 if (url.includes('video') || url.includes('.mp4')) {
-                  const quality = extractQualityImproved(url);
-                  const bitrate = extractBitrate(url);
-                  const isTarget = targetPostId && checkIfTargetStream(url, targetPostId);
-                  
                   videoData.push({ 
                     url: url.replace(/\\u0026/g, '&').replace(/\\/g, ''),
-                    quality: quality,
-                    bitrate: bitrate,
-                    isTarget: isTarget
+                    quality: null,
+                    bitrate: 0,
+                    isTarget: false
                   });
                 }
               });
@@ -449,10 +527,28 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       console.log('Alternative streams found:', alternativeStreams.length);
       
       alternativeStreams.forEach(streamData => {
-        const quality = streamData.quality || 'unknown';
-        if (!streams.videos.has(quality) || 
-            (streams.videos.get(quality).bitrate || 0) < (streamData.bitrate || 0)) {
-          streams.videos.set(quality, streamData);
+        const quality = extractQualityImproved(streamData.url);
+        const bitrate = extractBitrate(streamData.url);
+        const isTarget = checkIfTargetStream(streamData.url, postId);
+        
+        streamData.quality = quality;
+        streamData.bitrate = bitrate;
+        streamData.isTarget = isTarget;
+        
+        const qualityKey = quality || 'unknown';
+        if (!streams.videos.has(qualityKey) || 
+            (streams.videos.get(qualityKey).bitrate || 0) < (bitrate || 0)) {
+          streams.videos.set(qualityKey, {
+            url: streamData.url,
+            quality: quality,
+            bitrate: bitrate,
+            isTarget: isTarget,
+            contentLength: 0,
+            timestamp: Date.now(),
+            responseOrder: 0,
+            isDash: streamData.url.includes('dash'),
+            isProgressive: streamData.url.includes('progressive')
+          });
         }
       });
       
@@ -477,7 +573,6 @@ router.post('/fetch-fb-video-data', async (req, res) => {
 
     console.log(`Selected video URL: ${videoUrl} (Quality: ${quality}p, Bitrate: ${bestVideoEntry.bitrate || 'unknown'})`);
 
-    // Try to merge streams if both video and audio are available
     if (videoUrl && bestAudioUrl) {
       try {
         console.log('Attempting to merge video and audio streams...');
@@ -538,27 +633,31 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       }
     });
   } finally {
+    if (page) {
+      try {
+        await page.close();
+      } catch (e) {}
+    }
     if (browser) {
       await browser.close();
     }
   }
 });
 
-// Improved post ID extraction
 function extractPostId(url) {
   try {
     const patterns = [
-      /\/share\/v\/([^\/\?]+)/,             
-      /\/share\/r\/([^\/\?]+)/,             // New pattern for /share/r/ URLs
-      /\/videos\/(\d+)/,                    
-      /\/posts\/(\d+)/,                     
-      /\/video\.php\?v=(\d+)/,              
-      /story_fbid=(\d+)/,                   
-      /fbid=(\d+)/,                         
-      /\/(\d{10,})/,                        
-      /watch\/?\?v=(\d+)/,                  
-      /permalink\.php.*story_fbid=(\d+)/,   
-      /\/reel\/(\d+)/,                      
+      /\/share\/v\/([^\/\?]+)/,
+      /\/share\/r\/([^\/\?]+)/,
+      /\/videos\/(\d+)/,
+      /\/posts\/(\d+)/,
+      /\/video\.php\?v=(\d+)/,
+      /story_fbid=(\d+)/,
+      /fbid=(\d+)/,
+      /\/(\d{10,})/,
+      /watch\/?\?v=(\d+)/,
+      /permalink\.php.*story_fbid=(\d+)/,
+      /\/reel\/(\d+)/,
     ];
     
     for (const pattern of patterns) {
@@ -585,29 +684,23 @@ function extractPostId(url) {
   }
 }
 
-// Significantly improved quality extraction
 function extractQualityImproved(url) {
   try {
-    // Decode the efg parameter which contains quality information
     const efgMatch = url.match(/efg=([^&]+)/);
     if (efgMatch) {
       try {
         const decodedEfg = decodeURIComponent(efgMatch[1]);
         const efgData = JSON.parse(atob(decodedEfg));
         
-        // Extract quality from vencode_tag
         if (efgData.vencode_tag) {
           const qualityMatch = efgData.vencode_tag.match(/(\d+)p/);
           if (qualityMatch) {
             return parseInt(qualityMatch[1]);
           }
         }
-      } catch (e) {
-        // Continue to other methods if decode fails
-      }
+      } catch (e) {}
     }
     
-    // Extract from tag parameter
     const tagMatch = url.match(/tag=([^&]+)/);
     if (tagMatch) {
       const tag = decodeURIComponent(tagMatch[1]);
@@ -617,11 +710,9 @@ function extractQualityImproved(url) {
       }
     }
     
-    // Bitrate-based quality estimation
     const bitrateMatch = url.match(/bitrate=(\d+)/);
     if (bitrateMatch) {
       const bitrate = parseInt(bitrateMatch[1]);
-      // Estimate quality based on bitrate
       if (bitrate > 3000000) return 1080;
       if (bitrate > 1500000) return 720;
       if (bitrate > 800000) return 480;
@@ -629,7 +720,6 @@ function extractQualityImproved(url) {
       return 240;
     }
     
-    // Fallback patterns
     const patterns = [
       /(\d+)p\.mp4/,
       /height_(\d+)/,
@@ -637,14 +727,13 @@ function extractQualityImproved(url) {
       /hd_(\d+)/,
       /quality_(\d+)/,
       /res_(\d+)/,
-      /f(\d+)\//  // Facebook's f1/, f2/, etc. format
+      /f(\d+)\//
     ];
     
     for (const pattern of patterns) {
       const match = url.match(pattern);
       if (match) {
         let quality = parseInt(match[1]);
-        // Convert f-number to quality
         if (pattern.source === 'f(\\d+)\\/') {
           const fNumber = quality;
           if (fNumber === 4) quality = 2160;
@@ -664,17 +753,14 @@ function extractQualityImproved(url) {
   }
 }
 
-// Extract bitrate from URL
 function extractBitrate(url) {
   const bitrateMatch = url.match(/bitrate=(\d+)/);
   return bitrateMatch ? parseInt(bitrateMatch[1]) : 0;
 }
 
-// Improved target stream checking
 function checkIfTargetStream(url, postId) {
   if (!postId) return false;
   
-  // Direct ID matching (case insensitive)
   const postIdLower = postId.toLowerCase();
   const urlLower = url.toLowerCase();
   
@@ -682,9 +768,7 @@ function checkIfTargetStream(url, postId) {
     return true;
   }
   
-  // Check encoded parameters
   try {
-    // Check _nc_vs parameter (base64 encoded data)
     const ncVsMatch = url.match(/_nc_vs=([^&]+)/);
     if (ncVsMatch) {
       try {
@@ -694,7 +778,6 @@ function checkIfTargetStream(url, postId) {
           return true;
         }
       } catch (e) {
-        // Try without base64 decode
         const encodedData = decodeURIComponent(ncVsMatch[1]);
         if (encodedData.toLowerCase().includes(postIdLower)) {
           return true;
@@ -702,18 +785,15 @@ function checkIfTargetStream(url, postId) {
       }
     }
     
-    // Check vs parameter (often contains post correlation)
     const vsMatch = url.match(/vs=([^&]+)/);
     if (vsMatch) {
       const vsValue = vsMatch[1].toLowerCase();
-      // Sometimes the vs parameter correlates with post ID through hash
       if (vsValue.includes(postIdLower.slice(-6)) || 
           postIdLower.includes(vsValue.slice(-6))) {
         return true;
       }
     }
     
-    // Check efg parameter for asset correlation
     const efgMatch = url.match(/efg=([^&]+)/);
     if (efgMatch) {
       const decodedEfg = decodeURIComponent(efgMatch[1]);
@@ -721,7 +801,6 @@ function checkIfTargetStream(url, postId) {
       
       if (efgData.xpv_asset_id) {
         const assetId = efgData.xpv_asset_id.toString();
-        // More flexible asset ID matching
         if (assetId.includes(postId) || 
             postId.includes(assetId.slice(-8)) ||
             assetId.slice(-8).includes(postId.slice(-6))) {
@@ -730,7 +809,6 @@ function checkIfTargetStream(url, postId) {
       }
     }
     
-    // Check oh parameter (hash that sometimes correlates)
     const ohMatch = url.match(/oh=([^&]+)/);
     if (ohMatch) {
       const ohValue = ohMatch[1].toLowerCase();
@@ -739,14 +817,11 @@ function checkIfTargetStream(url, postId) {
       }
     }
     
-  } catch (e) {
-    // Ignore decode errors
-  }
+  } catch (e) {}
   
   return false;
 }
 
-// Improved stream selection logic
 function selectBestVideoStream(streams, postId) {
   const videoEntries = Array.from(streams.videos.entries());
   
@@ -762,7 +837,6 @@ function selectBestVideoStream(streams, postId) {
     isTarget: d.isTarget
   })));
   
-  // First priority: Target-specific streams with good quality
   if (postId) {
     const targetStreams = videoEntries.filter(([quality, data]) => data.isTarget);
     if (targetStreams.length > 0) {
@@ -771,7 +845,6 @@ function selectBestVideoStream(streams, postId) {
         const bQuality = parseInt(bQ) || 0;
         if (aQuality !== bQuality) return bQuality - aQuality;
         
-        // Prefer progressive over DASH
         if (aData.isProgressive !== bData.isProgressive) {
           return aData.isProgressive ? -1 : 1;
         }
@@ -783,7 +856,6 @@ function selectBestVideoStream(streams, postId) {
     }
   }
   
-  // Second priority: Post-interaction streams
   if (streams.mainVideoInteractionTime) {
     const postInteractionStreams = videoEntries.filter(([quality, data]) => 
       data.timestamp > streams.mainVideoInteractionTime
@@ -794,24 +866,19 @@ function selectBestVideoStream(streams, postId) {
         const aQuality = parseInt(aQ) || 0;
         const bQuality = parseInt(bQ) || 0;
         
-        // First sort by quality
         if (aQuality !== bQuality) return bQuality - aQuality;
         
-        // Then prefer progressive over DASH
         if (aData.isProgressive !== bData.isProgressive) {
           return aData.isProgressive ? -1 : 1;
         }
         
-        // For DASH streams, prefer the one with largest content length
-        // (likely the most complete segment)
         if (!aData.isProgressive && !bData.isProgressive) {
           const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
-          if (Math.abs(sizeDiff) > 1000000) { // 1MB difference
+          if (Math.abs(sizeDiff) > 1000000) {
             return sizeDiff;
           }
         }
         
-        // Finally sort by bitrate
         return (bData.bitrate || 0) - (aData.bitrate || 0);
       });
       
@@ -820,31 +887,25 @@ function selectBestVideoStream(streams, postId) {
     }
   }
   
-  // Third priority: Best quality available with smart DASH handling
   const sortedByQuality = videoEntries.sort(([aQ, aData], [bQ, bData]) => {
     const aQuality = parseInt(aQ) || 0;
     const bQuality = parseInt(bQ) || 0;
     
-    // Prioritize quality first
     if (aQuality !== bQuality) {
       return bQuality - aQuality;
     }
     
-    // For same quality, prefer progressive over DASH
     if (aData.isProgressive !== bData.isProgressive) {
       return aData.isProgressive ? -1 : 1;
     }
     
-    // For DASH streams of same quality, prefer larger file size
-    // (indicates more complete/longer segment)
     if (!aData.isProgressive && !bData.isProgressive) {
       const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
-      if (Math.abs(sizeDiff) > 1000000) { // Significant size difference
+      if (Math.abs(sizeDiff) > 1000000) {
         return sizeDiff;
       }
     }
     
-    // Finally prefer higher bitrate
     return (bData.bitrate || 0) - (aData.bitrate || 0);
   });
   
@@ -856,7 +917,6 @@ function selectBestVideoStream(streams, postId) {
 function selectBestAudioStream(streams, postId) {
   if (streams.audios.length === 0) return null;
   
-  // Prefer target-specific audio
   if (postId) {
     const targetAudio = streams.audios.find(audio => audio.isTarget);
     if (targetAudio) {
@@ -865,7 +925,6 @@ function selectBestAudioStream(streams, postId) {
     }
   }
   
-  // Sort by bitrate and recency
   const sortedAudios = streams.audios.sort((a, b) => {
     const bitrateDiff = (b.bitrate || 0) - (a.bitrate || 0);
     if (Math.abs(bitrateDiff) > 50000) return bitrateDiff;
@@ -910,7 +969,6 @@ function convertToDesktopUrl(url) {
   }
 }
 
-// Legacy function for compatibility
 function extractQuality(url) {
   return extractQualityImproved(url);
 }
@@ -950,13 +1008,11 @@ async function mergeStreams(videoUrl, audioUrl, outputDir) {
         });
     });
 
-    // Clean up temporary files
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
 
     return outputPath;
   } catch (error) {
-    // Clean up on error
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
     throw error;
