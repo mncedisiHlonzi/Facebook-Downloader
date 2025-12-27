@@ -77,6 +77,7 @@ router.post('/fetch-fb-video-data', async (req, res) => {
     };
 
     const postId = extractPostId(url);
+    const extractedAssetIds = new Set(); // Track asset IDs we find
     console.log(`Target post ID: ${postId}`);
 
     // Helper function to setup page handlers
@@ -111,7 +112,15 @@ router.post('/fetch-fb-video-data', async (req, res) => {
             
             const quality = extractQualityImproved(responseUrl);
             const bitrate = extractBitrate(responseUrl);
-            const isTarget = checkIfTargetStream(responseUrl, postId);
+            const assetId = extractAssetId(responseUrl);
+            
+            // Track all asset IDs we encounter
+            if (assetId) {
+              extractedAssetIds.add(assetId);
+            }
+            
+            // Check if this is the target stream
+            const isTarget = checkIfTargetStream(responseUrl, postId, extractedAssetIds);
             
             const streamData = {
               url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
@@ -119,6 +128,7 @@ router.post('/fetch-fb-video-data', async (req, res) => {
               bitrate: bitrate,
               contentLength: contentLength,
               isTarget: isTarget,
+              assetId: assetId,
               timestamp: Date.now(),
               responseOrder: streams.allVideoStreams.length,
               isDash: responseUrl.includes('dash'),
@@ -138,19 +148,21 @@ router.post('/fetch-fb-video-data', async (req, res) => {
               streams.targetVideoFound = true;
             }
             
-            console.log(`Found video stream: ${quality || 'unknown'}p - Bitrate: ${bitrate} - Target: ${isTarget} - Progressive: ${streamData.isProgressive} - Size: ${contentLength}`);
+            console.log(`Found video stream: ${quality || 'unknown'}p - Bitrate: ${bitrate} - Asset: ${assetId || 'none'} - Target: ${isTarget} - Progressive: ${streamData.isProgressive} - Size: ${contentLength}`);
           }
 
           if (contentType.includes('audio/mp4') || 
               contentType.includes('audio/') ||
               responseUrl.includes('audio_dashinit')) {
             
-            const isTarget = checkIfTargetStream(responseUrl, postId);
+            const assetId = extractAssetId(responseUrl);
+            const isTarget = checkIfTargetStream(responseUrl, postId, extractedAssetIds);
             const bitrate = extractBitrate(responseUrl);
             
             const audioData = {
               url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
               isTarget: isTarget,
+              assetId: assetId,
               bitrate: bitrate,
               timestamp: Date.now(),
               responseOrder: streams.audios.length
@@ -158,7 +170,7 @@ router.post('/fetch-fb-video-data', async (req, res) => {
             
             if (!streams.audios.find(a => a.url === audioData.url)) {
               streams.audios.push(audioData);
-              console.log(`Found audio stream: Target: ${isTarget} - Bitrate: ${bitrate}`);
+              console.log(`Found audio stream: Asset: ${assetId || 'none'} - Target: ${isTarget} - Bitrate: ${bitrate}`);
             }
           }
         } catch (err) {
@@ -590,11 +602,17 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       alternativeStreams.forEach(streamData => {
         const quality = extractQualityImproved(streamData.url);
         const bitrate = extractBitrate(streamData.url);
-        const isTarget = checkIfTargetStream(streamData.url, postId);
+        const assetId = extractAssetId(streamData.url);
+        const isTarget = checkIfTargetStream(streamData.url, postId, extractedAssetIds);
         
         streamData.quality = quality;
         streamData.bitrate = bitrate;
+        streamData.assetId = assetId;
         streamData.isTarget = isTarget;
+        
+        if (assetId) {
+          extractedAssetIds.add(assetId);
+        }
         
         const qualityKey = quality || 'unknown';
         if (!streams.videos.has(qualityKey) || 
@@ -603,6 +621,7 @@ router.post('/fetch-fb-video-data', async (req, res) => {
             url: streamData.url,
             quality: quality,
             bitrate: bitrate,
+            assetId: assetId,
             isTarget: isTarget,
             contentLength: 0,
             timestamp: Date.now(),
@@ -853,20 +872,81 @@ function extractBitrate(url) {
   return bitrateMatch ? parseInt(bitrateMatch[1]) : 0;
 }
 
-// ENHANCED TARGET STREAM CHECKING
-function checkIfTargetStream(url, postId) {
+// NEW: Extract asset ID from stream URL
+function extractAssetId(url) {
+  try {
+    // Check efg parameter for xpv_asset_id
+    const efgMatch = url.match(/efg=([^&]+)/);
+    if (efgMatch) {
+      try {
+        const decodedEfg = decodeURIComponent(efgMatch[1]);
+        const efgData = JSON.parse(atob(decodedEfg));
+        
+        if (efgData.xpv_asset_id) {
+          return efgData.xpv_asset_id.toString();
+        }
+        if (efgData.video_id) {
+          return efgData.video_id.toString();
+        }
+        if (efgData.id) {
+          return efgData.id.toString();
+        }
+      } catch (e) {
+        // If parsing fails, continue
+      }
+    }
+    
+    // Try other patterns
+    const patterns = [
+      /video_id[=:](\d+)/,
+      /asset_id[=:](\d+)/,
+      /id[=:](\d+)/
+    ];
+    
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// ENHANCED TARGET STREAM CHECKING - Now uses asset ID context
+function checkIfTargetStream(url, postId, extractedAssetIds) {
   if (!postId) return false;
   
   const postIdLower = postId.toLowerCase();
   const urlLower = url.toLowerCase();
   
-  // Direct match in URL
+  // Extract asset ID from this stream
+  const streamAssetId = extractAssetId(url);
+  
+  // Strategy 1: If we only have ONE unique asset ID across all streams, it must be the target
+  if (extractedAssetIds && extractedAssetIds.size === 1 && streamAssetId) {
+    console.log('✓ Target matched: Only one asset ID found across all streams');
+    return true;
+  }
+  
+  // Strategy 2: If this is the FIRST stream with this asset ID (not a suggested video)
+  // This helps because the main video usually loads first
+  if (streamAssetId && extractedAssetIds && extractedAssetIds.size <= 2) {
+    // Among the first 2 asset IDs, prefer the larger one
+    console.log('✓ Target matched: Early stream (likely main video)');
+    return true;
+  }
+  
+  // Strategy 3: Direct match in URL
   if (urlLower.includes(postIdLower)) {
     console.log('✓ Target matched: Direct post ID in URL');
     return true;
   }
   
-  // Check for partial matches (last 8 digits minimum)
+  // Strategy 4: Check for partial matches (last 8 digits minimum)
   if (postId.length >= 8) {
     const postIdEnd = postIdLower.slice(-8);
     if (urlLower.includes(postIdEnd)) {
@@ -876,7 +956,7 @@ function checkIfTargetStream(url, postId) {
   }
   
   try {
-    // Check _nc_vs parameter
+    // Strategy 5: Check _nc_vs parameter
     const ncVsMatch = url.match(/_nc_vs=([^&]+)/);
     if (ncVsMatch) {
       try {
@@ -901,7 +981,7 @@ function checkIfTargetStream(url, postId) {
       }
     }
     
-    // Check efg parameter for asset_id
+    // Strategy 6: Check efg parameter for asset_id match
     const efgMatch = url.match(/efg=([^&]+)/);
     if (efgMatch) {
       const decodedEfg = decodeURIComponent(efgMatch[1]);
@@ -923,7 +1003,7 @@ function checkIfTargetStream(url, postId) {
       }
     }
     
-    // Check 'vs' parameter
+    // Strategy 7: Check 'vs' parameter
     const vsMatch = url.match(/vs=([^&]+)/);
     if (vsMatch) {
       const vsValue = vsMatch[1].toLowerCase();
@@ -934,7 +1014,7 @@ function checkIfTargetStream(url, postId) {
       }
     }
     
-    // Check 'oh' hash parameter
+    // Strategy 8: Check 'oh' hash parameter
     const ohMatch = url.match(/oh=([^&]+)/);
     if (ohMatch && postId.length >= 6) {
       const ohValue = ohMatch[1].toLowerCase();
@@ -964,6 +1044,11 @@ function selectBestVideoStream(streams, postId) {
   console.log(`Total streams found: ${videoEntries.length}`);
   console.log(`Target Post ID: ${postId}`);
   
+  // Log all asset IDs we found
+  const allAssetIds = streams.allVideoStreams.map(s => s.assetId).filter(Boolean);
+  const uniqueAssetIds = [...new Set(allAssetIds)];
+  console.log(`Unique Asset IDs found: ${uniqueAssetIds.length} - [${uniqueAssetIds.join(', ')}]`);
+  
   // PRIORITY 1: Target-specific streams (highest priority)
   if (postId) {
     const targetStreams = videoEntries.filter(([quality, data]) => data.isTarget);
@@ -986,12 +1071,34 @@ function selectBestVideoStream(streams, postId) {
         return (bData.bitrate || 0) - (aData.bitrate || 0);
       });
       
-      console.log(`✓ SELECTED: Target-matched stream - ${sorted[0][0]}p`);
+      console.log(`✓ SELECTED: Target-matched stream - ${sorted[0][0]}p (Asset: ${sorted[0][1].assetId})`);
       return sorted[0][1];
     }
   }
   
-  // PRIORITY 2: Post-interaction streams (streams loaded after video interaction)
+  // PRIORITY 1.5: If only ONE unique asset ID, use the highest quality from it
+  if (uniqueAssetIds.length === 1) {
+    const singleAssetStreams = videoEntries.filter(([quality, data]) => 
+      data.assetId === uniqueAssetIds[0]
+    );
+    
+    if (singleAssetStreams.length > 0) {
+      const sorted = singleAssetStreams.sort(([aQ, aData], [bQ, bData]) => {
+        const aQuality = parseInt(aQ) || 0;
+        const bQuality = parseInt(bQ) || 0;
+        if (aQuality !== bQuality) return bQuality - aQuality;
+        if (aData.isProgressive !== bData.isProgressive) {
+          return aData.isProgressive ? -1 : 1;
+        }
+        return (bData.bitrate || 0) - (aData.bitrate || 0);
+      });
+      
+      console.log(`✓ SELECTED: Single asset ID stream - ${sorted[0][0]}p (Asset: ${sorted[0][1].assetId})`);
+      return sorted[0][1];
+    }
+  }
+  
+  // PRIORITY 2: Post-interaction streams with asset ID preference
   if (streams.mainVideoInteractionTime) {
     const postInteractionStreams = videoEntries.filter(([quality, data]) => 
       data.timestamp > streams.mainVideoInteractionTime
@@ -1000,65 +1107,118 @@ function selectBestVideoStream(streams, postId) {
     console.log(`Post-interaction streams: ${postInteractionStreams.length}`);
     
     if (postInteractionStreams.length > 0) {
-      // Among post-interaction streams, prefer larger file sizes (main video is usually bigger)
-      const sorted = postInteractionStreams.sort(([aQ, aData], [bQ, bData]) => {
-        // First, prefer larger file sizes
-        const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
-        if (Math.abs(sizeDiff) > 5000000) { // 5MB difference
-          return sizeDiff;
+      // Group by asset ID and prefer the one with most streams or largest total size
+      const assetGroups = {};
+      postInteractionStreams.forEach(([quality, data]) => {
+        const assetId = data.assetId || 'unknown';
+        if (!assetGroups[assetId]) {
+          assetGroups[assetId] = [];
         }
-        
-        // Then quality
-        const aQuality = parseInt(aQ) || 0;
-        const bQuality = parseInt(bQ) || 0;
-        if (aQuality !== bQuality) return bQuality - aQuality;
-        
-        // Then progressive vs DASH
-        if (aData.isProgressive !== bData.isProgressive) {
-          return aData.isProgressive ? -1 : 1;
-        }
-        
-        // Finally bitrate
-        return (bData.bitrate || 0) - (aData.bitrate || 0);
+        assetGroups[assetId].push([quality, data]);
       });
       
-      console.log(`✓ SELECTED: Post-interaction stream - ${sorted[0][0]}p (${sorted[0][1].contentLength} bytes)`);
-      return sorted[0][1];
+      // Find the asset ID with the largest total size
+      let bestAssetId = null;
+      let maxTotalSize = 0;
+      
+      Object.entries(assetGroups).forEach(([assetId, streams]) => {
+        const totalSize = streams.reduce((sum, [q, d]) => sum + (d.contentLength || 0), 0);
+        if (totalSize > maxTotalSize) {
+          maxTotalSize = totalSize;
+          bestAssetId = assetId;
+        }
+      });
+      
+      if (bestAssetId && assetGroups[bestAssetId]) {
+        const sorted = assetGroups[bestAssetId].sort(([aQ, aData], [bQ, bData]) => {
+          const aQuality = parseInt(aQ) || 0;
+          const bQuality = parseInt(bQ) || 0;
+          if (aQuality !== bQuality) return bQuality - aQuality;
+          if (aData.isProgressive !== bData.isProgressive) {
+            return aData.isProgressive ? -1 : 1;
+          }
+          return (bData.bitrate || 0) - (aData.bitrate || 0);
+        });
+        
+        console.log(`✓ SELECTED: Post-interaction stream - ${sorted[0][0]}p (Asset: ${bestAssetId}, Total size: ${maxTotalSize})`);
+        return sorted[0][1];
+      }
     }
   }
   
-  // PRIORITY 3: Fallback to best quality (but prefer larger files)
-  console.warn('⚠ Using fallback selection - may not be target video');
+  // PRIORITY 3: Fallback - prefer the asset ID with largest total size
+  console.warn('⚠ Using fallback selection with asset ID grouping');
   
-  const sortedByQuality = videoEntries.sort(([aQ, aData], [bQ, bData]) => {
-    // Strongly prefer larger file sizes (main video is usually bigger than suggestions)
-    const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
-    if (Math.abs(sizeDiff) > 10000000) { // 10MB difference - likely different videos
-      return sizeDiff;
+  // Group all streams by asset ID
+  const assetGroups = {};
+  videoEntries.forEach(([quality, data]) => {
+    const assetId = data.assetId || 'unknown';
+    if (!assetGroups[assetId]) {
+      assetGroups[assetId] = [];
     }
+    assetGroups[assetId].push([quality, data]);
+  });
+  
+  // Find the asset ID with the largest total size
+  let bestAssetId = null;
+  let maxTotalSize = 0;
+  
+  Object.entries(assetGroups).forEach(([assetId, streams]) => {
+    const totalSize = streams.reduce((sum, [q, d]) => sum + (d.contentLength || 0), 0);
+    if (totalSize > maxTotalSize) {
+      maxTotalSize = totalSize;
+      bestAssetId = assetId;
+    }
+  });
+  
+  if (bestAssetId && assetGroups[bestAssetId]) {
+    const sorted = assetGroups[bestAssetId].sort(([aQ, aData], [bQ, bData]) => {
+      const aQuality = parseInt(aQ) || 0;
+      const bQuality = parseInt(bQ) || 0;
+      if (aQuality !== bQuality) return bQuality - aQuality;
+      if (aData.isProgressive !== bData.isProgressive) {
+        return aData.isProgressive ? -1 : 1;
+      }
+      return (bData.bitrate || 0) - (aData.bitrate || 0);
+    });
     
+    console.log(`⚠ FALLBACK SELECTED: ${sorted[0][0]}p (Asset: ${bestAssetId}, Total size: ${maxTotalSize})`);
+    return sorted[0][1];
+  }
+  
+  // Ultimate fallback - just pick highest quality
+  const sorted = videoEntries.sort(([aQ, aData], [bQ, bData]) => {
     const aQuality = parseInt(aQ) || 0;
     const bQuality = parseInt(bQ) || 0;
-    
-    if (aQuality !== bQuality) {
-      return bQuality - aQuality;
-    }
-    
-    if (aData.isProgressive !== bData.isProgressive) {
-      return aData.isProgressive ? -1 : 1;
-    }
-    
+    if (aQuality !== bQuality) return bQuality - aQuality;
     return (bData.bitrate || 0) - (aData.bitrate || 0);
   });
   
-  const selected = sortedByQuality[0];
-  console.log(`⚠ FALLBACK SELECTED: ${selected[0]}p (${selected[1].contentLength} bytes, ${selected[1].bitrate} bitrate)`);
-  return selected[1];
+  console.log(`⚠ ULTIMATE FALLBACK: ${sorted[0][0]}p`);
+  return sorted[0][1];
 }
 
 function selectBestAudioStream(streams, postId) {
   if (streams.audios.length === 0) return null;
   
+  // Get all unique asset IDs from video streams
+  const videoAssetIds = streams.allVideoStreams
+    .map(s => s.assetId)
+    .filter(Boolean);
+  const uniqueVideoAssetIds = [...new Set(videoAssetIds)];
+  
+  // If we have a clear target asset ID from video selection, match audio to it
+  if (uniqueVideoAssetIds.length === 1) {
+    const matchingAudio = streams.audios.find(audio => 
+      audio.assetId === uniqueVideoAssetIds[0]
+    );
+    if (matchingAudio) {
+      console.log('Using asset-matched audio stream');
+      return matchingAudio.url;
+    }
+  }
+  
+  // Fallback to target-specific audio
   if (postId) {
     const targetAudio = streams.audios.find(audio => audio.isTarget);
     if (targetAudio) {
@@ -1067,6 +1227,7 @@ function selectBestAudioStream(streams, postId) {
     }
   }
   
+  // Fallback to highest quality audio
   const sortedAudios = streams.audios.sort((a, b) => {
     const bitrateDiff = (b.bitrate || 0) - (a.bitrate || 0);
     if (Math.abs(bitrateDiff) > 50000) return bitrateDiff;
