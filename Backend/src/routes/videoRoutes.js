@@ -311,68 +311,129 @@ router.post('/fetch-fb-video-data', async (req, res) => {
           const videos = Array.from(document.querySelectorAll('video'));
           console.log(`Found ${videos.length} video elements on page`);
           
-          if (videos.length === 1) {
-            return { video: videos[0], reason: 'only-video' };
-          }
+          if (videos.length === 0) return null;
+          if (videos.length === 1) return { video: videos[0], reason: 'only-video', score: 100 };
           
           const videoAnalysis = videos.map(video => {
             const rect = video.getBoundingClientRect();
             const area = rect.width * rect.height;
             
-            const isMainContent = video.closest('article') || 
-                                video.closest('[data-pagelet*="FeedUnit"]') ||
-                                video.closest('[role="main"]') ||
-                                video.closest('main');
+            // Check if in main content area
+            const isMainContent = !!(
+              video.closest('article') || 
+              video.closest('[data-pagelet*="FeedUnit"]') ||
+              video.closest('[role="main"]') ||
+              video.closest('main') ||
+              video.closest('[data-pagelet*="PermalinkPost"]') ||
+              video.closest('[data-pagelet="Watch"]')
+            );
             
-            const isSuggested = video.closest('[data-pagelet*="RightRail"]') ||
-                              video.closest('[data-pagelet*="Suggested"]') ||
-                              video.closest('.uiSideNav') ||
-                              rect.width < 200;
+            // Check if in sidebar/suggested
+            const isSuggested = !!(
+              video.closest('[data-pagelet*="RightRail"]') ||
+              video.closest('[data-pagelet*="Suggested"]') ||
+              video.closest('.uiSideNav') ||
+              video.closest('[aria-label*="Suggested"]') ||
+              rect.width < 250  // Sidebar videos are typically smaller
+            );
             
-            const distanceFromTop = rect.top + window.scrollY;
-            const container = video.closest('div[data-pagelet]') || video.closest('article') || video.parentElement;
-            const hasDescription = container && container.querySelector('[data-testid*="post-content"], .userContent, [data-ad-preview]');
+            // Check viewport position
+            const viewportHeight = window.innerHeight;
+            const isInViewport = rect.top >= 0 && rect.bottom <= viewportHeight;
+            const distanceFromTop = Math.abs(rect.top);
+            
+            // Check for post description (strong indicator of main video)
+            const container = video.closest('div[data-pagelet]') || 
+                             video.closest('article') || 
+                             video.parentElement;
+            const hasDescription = container && !!(
+              container.querySelector('[data-testid*="post-content"]') ||
+              container.querySelector('.userContent') ||
+              container.querySelector('[data-ad-preview="message"]')
+            );
+            
+            // Check if video has controls or is autoplay
+            const hasControls = video.hasAttribute('controls');
+            const isAutoplay = video.hasAttribute('autoplay') || video.autoplay;
+            
+            // Check z-index and visibility
+            const style = window.getComputedStyle(video);
+            const zIndex = parseInt(style.zIndex) || 0;
+            const isVisible = style.display !== 'none' && 
+                             style.visibility !== 'hidden' &&
+                             style.opacity !== '0';
             
             return {
               video,
               area,
-              isMainContent: !!isMainContent,
-              isSuggested: !!isSuggested,
+              isMainContent,
+              isSuggested,
               distanceFromTop,
-              hasDescription: !!hasDescription,
+              hasDescription,
+              isInViewport,
+              hasControls,
+              isAutoplay,
+              zIndex,
+              isVisible,
               score: 0
             };
           });
           
+          // Calculate scores
           videoAnalysis.forEach(analysis => {
             let score = 0;
             
-            if (analysis.area > 50000) score += 3;
-            else if (analysis.area > 20000) score += 2;
+            // Area scoring (heavily weighted)
+            if (analysis.area > 100000) score += 10;
+            else if (analysis.area > 50000) score += 7;
+            else if (analysis.area > 20000) score += 4;
             else if (analysis.area > 5000) score += 1;
+            else score -= 5; // Penalize very small videos
             
-            if (analysis.isMainContent) score += 5;
-            if (analysis.isSuggested) score -= 3;
+            // Content area (critical)
+            if (analysis.isMainContent) score += 15;
+            if (analysis.isSuggested) score -= 20; // Heavy penalty
             
-            if (analysis.distanceFromTop < 500) score += 2;
-            else if (analysis.distanceFromTop < 1000) score += 1;
+            // Viewport position
+            if (analysis.isInViewport) score += 5;
+            if (analysis.distanceFromTop < 300) score += 5;
+            else if (analysis.distanceFromTop < 800) score += 2;
             
-            if (analysis.hasDescription) score += 2;
+            // Has description (strong indicator)
+            if (analysis.hasDescription) score += 10;
+            
+            // Controls and autoplay
+            if (analysis.hasControls) score += 3;
+            if (analysis.isAutoplay) score += 2;
+            
+            // Visibility and z-index
+            if (!analysis.isVisible) score -= 50; // Eliminate hidden videos
+            if (analysis.zIndex > 0) score += 2;
             
             analysis.score = score;
           });
           
+          // Sort by score
           videoAnalysis.sort((a, b) => b.score - a.score);
+          
+          // Log top 3 candidates
+          console.log('Top video candidates:', videoAnalysis.slice(0, 3).map(v => ({
+            score: v.score,
+            area: v.area,
+            isMainContent: v.isMainContent,
+            isSuggested: v.isSuggested,
+            hasDescription: v.hasDescription
+          })));
           
           return { 
             video: videoAnalysis[0].video, 
-            reason: 'context-analysis',
+            reason: 'enhanced-context-analysis',
             score: videoAnalysis[0].score
           };
         };
 
         const result = findMainVideo();
-        const targetVideo = result.video;
+        const targetVideo = result?.video;
         
         if (targetVideo) {
           targetVideo.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -555,6 +616,9 @@ router.post('/fetch-fb-video-data', async (req, res) => {
       bestVideoEntry = selectBestVideoStream(streams, postId);
     }
 
+    // Verify stream selection
+    const isVerified = verifyStreamSelection(bestVideoEntry, streams, postId);
+
     const videoUrl = bestVideoEntry ? (bestVideoEntry.url || bestVideoEntry[1]?.url) : null;
     const quality = bestVideoEntry ? (bestVideoEntry.quality || bestVideoEntry[0]) : null;
 
@@ -572,6 +636,7 @@ router.post('/fetch-fb-video-data', async (req, res) => {
     }
 
     console.log(`Selected video URL: ${videoUrl} (Quality: ${quality}p, Bitrate: ${bestVideoEntry.bitrate || 'unknown'})`);
+    console.log(`Selection confidence: ${bestVideoEntry.isTarget ? 'HIGH' : isVerified ? 'MEDIUM' : 'LOW'}`);
 
     if (videoUrl && bestAudioUrl) {
       try {
@@ -588,11 +653,13 @@ router.post('/fetch-fb-video-data', async (req, res) => {
             quality: 'Merged HD',
             duration: metadata.duration,
             description: metadata.description,
+            confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low',
             debug: {
               postId: postId,
               targetFound: streams.targetVideoFound,
               merged: true,
-              originalQuality: quality
+              originalQuality: quality,
+              confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low'
             }
           }
         });
@@ -611,13 +678,15 @@ router.post('/fetch-fb-video-data', async (req, res) => {
         quality: quality ? `${quality}p` : 'Available',
         duration: metadata.duration,
         description: metadata.description,
+        confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low',
         debug: {
           postId: postId,
           targetFound: streams.targetVideoFound,
           availableQualities: Array.from(streams.videos.keys()).sort((a, b) => 
             (parseInt(b) || 0) - (parseInt(a) || 0)
           ),
-          selectedBitrate: bestVideoEntry?.bitrate
+          selectedBitrate: bestVideoEntry?.bitrate,
+          confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low'
         }
       }
     });
@@ -644,39 +713,65 @@ router.post('/fetch-fb-video-data', async (req, res) => {
   }
 });
 
+// IMPROVED POST ID EXTRACTION
 function extractPostId(url) {
   try {
+    // First, try to get the full URL path for better context
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname;
+    
+    // Extended patterns with priority order
     const patterns = [
-      /\/share\/v\/([^\/\?]+)/,
-      /\/share\/r\/([^\/\?]+)/,
-      /\/videos\/(\d+)/,
-      /\/posts\/(\d+)/,
-      /\/video\.php\?v=(\d+)/,
-      /story_fbid=(\d+)/,
-      /fbid=(\d+)/,
-      /\/(\d{10,})/,
-      /watch\/?\?v=(\d+)/,
-      /permalink\.php.*story_fbid=(\d+)/,
-      /\/reel\/(\d+)/,
+      // Highest priority - most specific patterns
+      /\/reel\/(\d+)/,                    // Reels format
+      /\/videos\/(\d+)/,                  // Standard video format
+      /\/watch\/?\?v=(\d+)/,              // Watch page format
+      /\/video\.php\?v=(\d+)/,            // Old format
+      
+      // Medium priority - share links
+      /\/share\/v\/([a-zA-Z0-9_-]+)/,    // New share format
+      /\/share\/r\/([a-zA-Z0-9_-]+)/,    // Reel share format
+      
+      // Lower priority - post formats
+      /\/posts\/([a-zA-Z0-9_-]+)/,       // Post format
+      /story_fbid=([a-zA-Z0-9_-]+)/,     // Story format
+      /fbid=([a-zA-Z0-9_-]+)/,           // FBID param
+      /permalink\.php.*story_fbid=([a-zA-Z0-9_-]+)/, // Permalink
+      
+      // Fallback - any long number in path
+      /\/([0-9]{10,})/
     ];
     
     for (const pattern of patterns) {
       const match = url.match(pattern);
       if (match && match[1]) {
+        console.log(`Post ID extracted via pattern: ${pattern}, ID: ${match[1]}`);
         return match[1];
       }
     }
     
-    const urlObj = new URL(url);
+    // Check URL parameters
     const params = urlObj.searchParams;
+    const paramPriority = ['v', 'video_id', 'story_fbid', 'fbid', 'id'];
     
-    for (const [key, value] of params) {
-      if ((key.includes('id') || key.includes('fbid') || key === 'v') && 
-          (value.length >= 8)) {
+    for (const param of paramPriority) {
+      const value = params.get(param);
+      if (value && value.length >= 8) {
+        console.log(`Post ID extracted from param ${param}: ${value}`);
         return value;
       }
     }
     
+    // Last resort - extract from full URL path
+    const segments = pathname.split('/').filter(s => s.length > 0);
+    for (const segment of segments) {
+      if (/^[0-9]{10,}$/.test(segment)) {
+        console.log(`Post ID extracted from path segment: ${segment}`);
+        return segment;
+      }
+    }
+    
+    console.warn('Could not extract post ID from URL');
     return null;
   } catch (error) {
     console.error('Error extracting post ID:', error);
@@ -758,136 +853,190 @@ function extractBitrate(url) {
   return bitrateMatch ? parseInt(bitrateMatch[1]) : 0;
 }
 
+// ENHANCED TARGET STREAM CHECKING
 function checkIfTargetStream(url, postId) {
   if (!postId) return false;
   
   const postIdLower = postId.toLowerCase();
   const urlLower = url.toLowerCase();
   
+  // Direct match in URL
   if (urlLower.includes(postIdLower)) {
+    console.log('✓ Target matched: Direct post ID in URL');
     return true;
   }
   
+  // Check for partial matches (last 8 digits minimum)
+  if (postId.length >= 8) {
+    const postIdEnd = postIdLower.slice(-8);
+    if (urlLower.includes(postIdEnd)) {
+      console.log('✓ Target matched: Partial post ID match');
+      return true;
+    }
+  }
+  
   try {
+    // Check _nc_vs parameter
     const ncVsMatch = url.match(/_nc_vs=([^&]+)/);
     if (ncVsMatch) {
       try {
         const encodedData = decodeURIComponent(ncVsMatch[1]);
         const decodedData = atob(encodedData);
         if (decodedData.toLowerCase().includes(postIdLower)) {
+          console.log('✓ Target matched: Found in _nc_vs');
+          return true;
+        }
+        // Check partial match in decoded data
+        if (postId.length >= 8 && decodedData.toLowerCase().includes(postIdLower.slice(-8))) {
+          console.log('✓ Target matched: Partial match in _nc_vs');
           return true;
         }
       } catch (e) {
+        // Try without base64 decode
         const encodedData = decodeURIComponent(ncVsMatch[1]);
         if (encodedData.toLowerCase().includes(postIdLower)) {
+          console.log('✓ Target matched: Found in raw _nc_vs');
           return true;
         }
       }
     }
     
-    const vsMatch = url.match(/vs=([^&]+)/);
-    if (vsMatch) {
-      const vsValue = vsMatch[1].toLowerCase();
-      if (vsValue.includes(postIdLower.slice(-6)) || 
-          postIdLower.includes(vsValue.slice(-6))) {
-        return true;
-      }
-    }
-    
+    // Check efg parameter for asset_id
     const efgMatch = url.match(/efg=([^&]+)/);
     if (efgMatch) {
       const decodedEfg = decodeURIComponent(efgMatch[1]);
       const efgData = JSON.parse(atob(decodedEfg));
       
-      if (efgData.xpv_asset_id) {
-        const assetId = efgData.xpv_asset_id.toString();
-        if (assetId.includes(postId) || 
-            postId.includes(assetId.slice(-8)) ||
-            assetId.slice(-8).includes(postId.slice(-6))) {
+      if (efgData.xpv_asset_id || efgData.video_id || efgData.id) {
+        const assetId = (efgData.xpv_asset_id || efgData.video_id || efgData.id).toString();
+        if (assetId.includes(postId) || postId.includes(assetId)) {
+          console.log('✓ Target matched: Found in efg asset ID');
           return true;
+        }
+        // Check last 8 digits
+        if (postId.length >= 8 && assetId.length >= 8) {
+          if (assetId.slice(-8) === postIdLower.slice(-8)) {
+            console.log('✓ Target matched: Asset ID partial match');
+            return true;
+          }
         }
       }
     }
     
-    const ohMatch = url.match(/oh=([^&]+)/);
-    if (ohMatch) {
-      const ohValue = ohMatch[1].toLowerCase();
-      if (ohValue.includes(postIdLower.slice(-6))) {
+    // Check 'vs' parameter
+    const vsMatch = url.match(/vs=([^&]+)/);
+    if (vsMatch) {
+      const vsValue = vsMatch[1].toLowerCase();
+      if (vsValue.includes(postIdLower) || 
+          (postIdLower.length >= 6 && vsValue.includes(postIdLower.slice(-6)))) {
+        console.log('✓ Target matched: Found in vs parameter');
         return true;
       }
     }
     
-  } catch (e) {}
+    // Check 'oh' hash parameter
+    const ohMatch = url.match(/oh=([^&]+)/);
+    if (ohMatch && postId.length >= 6) {
+      const ohValue = ohMatch[1].toLowerCase();
+      if (ohValue.includes(postIdLower.slice(-6))) {
+        console.log('✓ Target matched: Found in oh parameter');
+        return true;
+      }
+    }
+    
+  } catch (e) {
+    console.error('Error checking target stream:', e);
+  }
   
   return false;
 }
 
+// IMPROVED STREAM SELECTION LOGIC
 function selectBestVideoStream(streams, postId) {
   const videoEntries = Array.from(streams.videos.entries());
   
   if (videoEntries.length === 0) {
+    console.warn('No video streams found');
     return null;
   }
   
-  console.log('Selecting from streams:', videoEntries.map(([q, d]) => ({
-    quality: q,
-    bitrate: d.bitrate,
-    size: d.contentLength,
-    isProgressive: d.isProgressive,
-    isTarget: d.isTarget
-  })));
+  console.log('=== STREAM SELECTION DEBUG ===');
+  console.log(`Total streams found: ${videoEntries.length}`);
+  console.log(`Target Post ID: ${postId}`);
   
+  // PRIORITY 1: Target-specific streams (highest priority)
   if (postId) {
     const targetStreams = videoEntries.filter(([quality, data]) => data.isTarget);
+    console.log(`Target-matched streams: ${targetStreams.length}`);
+    
     if (targetStreams.length > 0) {
       const sorted = targetStreams.sort(([aQ, aData], [bQ, bData]) => {
         const aQuality = parseInt(aQ) || 0;
         const bQuality = parseInt(bQ) || 0;
+        
+        // Prefer higher quality
         if (aQuality !== bQuality) return bQuality - aQuality;
         
+        // Prefer progressive over DASH
         if (aData.isProgressive !== bData.isProgressive) {
           return aData.isProgressive ? -1 : 1;
         }
         
+        // Prefer higher bitrate
         return (bData.bitrate || 0) - (aData.bitrate || 0);
       });
-      console.log('Using target-specific video stream');
+      
+      console.log(`✓ SELECTED: Target-matched stream - ${sorted[0][0]}p`);
       return sorted[0][1];
     }
   }
   
+  // PRIORITY 2: Post-interaction streams (streams loaded after video interaction)
   if (streams.mainVideoInteractionTime) {
     const postInteractionStreams = videoEntries.filter(([quality, data]) => 
       data.timestamp > streams.mainVideoInteractionTime
     );
     
+    console.log(`Post-interaction streams: ${postInteractionStreams.length}`);
+    
     if (postInteractionStreams.length > 0) {
+      // Among post-interaction streams, prefer larger file sizes (main video is usually bigger)
       const sorted = postInteractionStreams.sort(([aQ, aData], [bQ, bData]) => {
+        // First, prefer larger file sizes
+        const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
+        if (Math.abs(sizeDiff) > 5000000) { // 5MB difference
+          return sizeDiff;
+        }
+        
+        // Then quality
         const aQuality = parseInt(aQ) || 0;
         const bQuality = parseInt(bQ) || 0;
-        
         if (aQuality !== bQuality) return bQuality - aQuality;
         
+        // Then progressive vs DASH
         if (aData.isProgressive !== bData.isProgressive) {
           return aData.isProgressive ? -1 : 1;
         }
         
-        if (!aData.isProgressive && !bData.isProgressive) {
-          const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
-          if (Math.abs(sizeDiff) > 1000000) {
-            return sizeDiff;
-          }
-        }
-        
+        // Finally bitrate
         return (bData.bitrate || 0) - (aData.bitrate || 0);
       });
       
-      console.log(`Using post-interaction video stream: ${sorted[0][0]}p (${sorted[0][1].isProgressive ? 'Progressive' : 'DASH'})`);
+      console.log(`✓ SELECTED: Post-interaction stream - ${sorted[0][0]}p (${sorted[0][1].contentLength} bytes)`);
       return sorted[0][1];
     }
   }
   
+  // PRIORITY 3: Fallback to best quality (but prefer larger files)
+  console.warn('⚠ Using fallback selection - may not be target video');
+  
   const sortedByQuality = videoEntries.sort(([aQ, aData], [bQ, bData]) => {
+    // Strongly prefer larger file sizes (main video is usually bigger than suggestions)
+    const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
+    if (Math.abs(sizeDiff) > 10000000) { // 10MB difference - likely different videos
+      return sizeDiff;
+    }
+    
     const aQuality = parseInt(aQ) || 0;
     const bQuality = parseInt(bQ) || 0;
     
@@ -899,18 +1048,11 @@ function selectBestVideoStream(streams, postId) {
       return aData.isProgressive ? -1 : 1;
     }
     
-    if (!aData.isProgressive && !bData.isProgressive) {
-      const sizeDiff = (bData.contentLength || 0) - (aData.contentLength || 0);
-      if (Math.abs(sizeDiff) > 1000000) {
-        return sizeDiff;
-      }
-    }
-    
     return (bData.bitrate || 0) - (aData.bitrate || 0);
   });
   
   const selected = sortedByQuality[0];
-  console.log(`Using best quality stream: ${selected[0]}p (${selected[1].isProgressive ? 'Progressive' : 'DASH'}, ${selected[1].contentLength} bytes, ${selected[1].bitrate} bitrate)`);
+  console.log(`⚠ FALLBACK SELECTED: ${selected[0]}p (${selected[1].contentLength} bytes, ${selected[1].bitrate} bitrate)`);
   return selected[1];
 }
 
@@ -933,6 +1075,46 @@ function selectBestAudioStream(streams, postId) {
   
   console.log(`Using best audio stream (bitrate: ${sortedAudios[0].bitrate || 'unknown'})`);
   return sortedAudios[0].url;
+}
+
+// VERIFICATION FUNCTION
+function verifyStreamSelection(selectedStream, allStreams, postId) {
+  console.log('=== STREAM VERIFICATION ===');
+  
+  if (!selectedStream) {
+    console.error('❌ No stream selected');
+    return false;
+  }
+  
+  // If we found a target-matched stream, we're confident
+  if (selectedStream.isTarget) {
+    console.log('✓ High confidence - stream matched target post ID');
+    return true;
+  }
+  
+  // Check if selected stream is significantly larger than others
+  const allSizes = Array.from(allStreams.videos.values())
+    .map(s => s.contentLength || 0)
+    .filter(s => s > 0);
+  
+  if (allSizes.length > 1) {
+    const avgSize = allSizes.reduce((a, b) => a + b, 0) / allSizes.length;
+    const selectedSize = selectedStream.contentLength || 0;
+    
+    if (selectedSize > avgSize * 1.5) {
+      console.log('✓ Medium confidence - stream is significantly larger than average');
+      return true;
+    }
+  }
+  
+  // If stream was loaded after video interaction, medium confidence
+  if (allStreams.mainVideoInteractionTime && selectedStream.timestamp > allStreams.mainVideoInteractionTime) {
+    console.log('⚠ Medium confidence - stream loaded after video interaction');
+    return true;
+  }
+  
+  console.warn('⚠ Low confidence - could not verify this is the correct video');
+  return false;
 }
 
 function convertToMobileUrl(url) {
