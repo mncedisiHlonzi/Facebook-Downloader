@@ -22,20 +22,29 @@ router.post('/fetch-fb-video-data', async (req, res) => {
   try {
     browser = await puppeteer.launch({
       headless: 'new',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process', // Important for Railway/limited memory environments
+        '--disable-gpu',
         '--disable-web-security',
         '--disable-features=VizDisplayCompositor',
         '--disable-blink-features=AutomationControlled',
-        '--no-first-run',
-        '--disable-gpu',
-        '--disable-dev-shm-usage',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
-        '--disable-renderer-backgrounding'
+        '--disable-renderer-backgrounding',
+        '--disable-extensions',
+        '--disable-software-rasterizer',
+        '--disable-translate',
+        '--mute-audio'
       ]
     });
+
     
     const page = await browser.newPage();
     
