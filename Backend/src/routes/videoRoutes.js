@@ -1098,6 +1098,80 @@ function selectBestVideoStream(streams, postId) {
     }
   }
   
+  // PRIORITY 1.6: Multiple asset IDs but no target match - use LARGEST total size per asset
+  if (uniqueAssetIds.length > 1) {
+    console.log('⚠ Multiple asset IDs without clear target match - analyzing sizes...');
+    
+    // Group by asset ID and calculate total sizes
+    const assetGroups = {};
+    videoEntries.forEach(([quality, data]) => {
+      const assetId = data.assetId || 'unknown';
+      if (!assetGroups[assetId]) {
+        assetGroups[assetId] = {
+          streams: [],
+          totalSize: 0,
+          maxQuality: 0,
+          firstTimestamp: Infinity
+        };
+      }
+      assetGroups[assetId].streams.push([quality, data]);
+      assetGroups[assetId].totalSize += (data.contentLength || 0);
+      assetGroups[assetId].maxQuality = Math.max(
+        assetGroups[assetId].maxQuality, 
+        parseInt(quality) || 0
+      );
+      assetGroups[assetId].firstTimestamp = Math.min(
+        assetGroups[assetId].firstTimestamp,
+        data.timestamp
+      );
+    });
+    
+    // Find the "main" asset based on multiple factors
+    let bestAssetId = null;
+    let bestScore = -1;
+    
+    Object.entries(assetGroups).forEach(([assetId, group]) => {
+      let score = 0;
+      
+      // Factor 1: Total size (heavily weighted) - main video is usually larger
+      score += (group.totalSize / 1000000) * 2; // Points per MB
+      
+      // Factor 2: Number of quality variants - main video has more qualities
+      score += group.streams.length * 10;
+      
+      // Factor 3: Maximum quality available
+      score += group.maxQuality / 10;
+      
+      // Factor 4: Loading order - first is more likely to be main
+      const isFirst = group.firstTimestamp === Math.min(
+        ...Object.values(assetGroups).map(g => g.firstTimestamp)
+      );
+      if (isFirst) score += 20;
+      
+      console.log(`Asset ${assetId}: Score=${score.toFixed(1)} (Size: ${(group.totalSize/1000000).toFixed(1)}MB, Qualities: ${group.streams.length}, Max: ${group.maxQuality}p, First: ${isFirst})`);
+      
+      if (score > bestScore) {
+        bestScore = score;
+        bestAssetId = assetId;
+      }
+    });
+    
+    if (bestAssetId && assetGroups[bestAssetId]) {
+      const sorted = assetGroups[bestAssetId].streams.sort(([aQ, aData], [bQ, bData]) => {
+        const aQuality = parseInt(aQ) || 0;
+        const bQuality = parseInt(bQ) || 0;
+        if (aQuality !== bQuality) return bQuality - aQuality;
+        if (aData.isProgressive !== bData.isProgressive) {
+          return aData.isProgressive ? -1 : 1;
+        }
+        return (bData.bitrate || 0) - (aData.bitrate || 0);
+      });
+      
+      console.log(`✓ SELECTED: Best scoring asset - ${sorted[0][0]}p (Asset: ${bestAssetId}, Score: ${bestScore.toFixed(1)})`);
+      return sorted[0][1];
+    }
+  }
+  
   // PRIORITY 2: Post-interaction streams with asset ID preference
   if (streams.mainVideoInteractionTime) {
     const postInteractionStreams = videoEntries.filter(([quality, data]) => 
@@ -1253,19 +1327,53 @@ function verifyStreamSelection(selectedStream, allStreams, postId) {
     return true;
   }
   
-  // Check if selected stream is significantly larger than others
-  const allSizes = Array.from(allStreams.videos.values())
-    .map(s => s.contentLength || 0)
-    .filter(s => s > 0);
+  // Get all unique asset IDs
+  const allAssetIds = Array.from(allStreams.videos.values())
+    .map(s => s.assetId)
+    .filter(Boolean);
+  const uniqueAssetIds = [...new Set(allAssetIds)];
   
-  if (allSizes.length > 1) {
-    const avgSize = allSizes.reduce((a, b) => a + b, 0) / allSizes.length;
-    const selectedSize = selectedStream.contentLength || 0;
-    
-    if (selectedSize > avgSize * 1.5) {
-      console.log('✓ Medium confidence - stream is significantly larger than average');
-      return true;
-    }
+  // If only one asset ID exists, high confidence
+  if (uniqueAssetIds.length === 1) {
+    console.log('✓ High confidence - only one asset ID found');
+    return true;
+  }
+  
+  // Check if this stream's asset has significantly more content
+  const assetSizes = {};
+  Array.from(allStreams.videos.values()).forEach(stream => {
+    const assetId = stream.assetId || 'unknown';
+    assetSizes[assetId] = (assetSizes[assetId] || 0) + (stream.contentLength || 0);
+  });
+  
+  const selectedAssetSize = assetSizes[selectedStream.assetId] || 0;
+  const avgOtherSize = Object.entries(assetSizes)
+    .filter(([id]) => id !== selectedStream.assetId)
+    .reduce((sum, [, size]) => sum + size, 0) / (Object.keys(assetSizes).length - 1 || 1);
+  
+  if (selectedAssetSize > avgOtherSize * 1.5) {
+    console.log('✓ Medium confidence - selected asset is significantly larger');
+    return true;
+  }
+  
+  // Check if selected asset has more quality variants
+  const assetQualityCounts = {};
+  Array.from(allStreams.videos.values()).forEach(stream => {
+    const assetId = stream.assetId || 'unknown';
+    assetQualityCounts[assetId] = (assetQualityCounts[assetId] || 0) + 1;
+  });
+  
+  const selectedQualityCount = assetQualityCounts[selectedStream.assetId] || 0;
+  const maxOtherCount = Math.max(
+    ...Object.entries(assetQualityCounts)
+      .filter(([id]) => id !== selectedStream.assetId)
+      .map(([, count]) => count),
+    0
+  );
+  
+  if (selectedQualityCount > maxOtherCount) {
+    console.log('⚠ Medium confidence - selected asset has more quality variants');
+    return true;
   }
   
   // If stream was loaded after video interaction, medium confidence
