@@ -158,6 +158,20 @@ router.post('/fetch-fb-video-data', async (req, res) => {
 
     console.log('🔍 Extracting video data from page...');
 
+    // Wait a bit more and try to interact with video to load higher quality streams
+    try {
+      await page.evaluate(() => {
+        const video = document.querySelector('video');
+        if (video) {
+          video.play().catch(() => {});
+          setTimeout(() => video.pause(), 100);
+        }
+      });
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } catch (e) {
+      // Continue anyway
+    }
+
     // **CORE EXTRACTION LOGIC**
     // Facebook embeds video data in <script> tags as JSON objects
     const videoData = await page.evaluate(() => {
@@ -243,12 +257,27 @@ router.post('/fetch-fb-video-data', async (req, res) => {
               });
             }
 
-            // Pattern 4: Direct URLs with context
+            // Pattern 4: Direct URLs with context - IMPROVED
             const urlPattern = /https:\/\/[^\s"']*video[^\s"']*(\.mp4|dash|progressive)[^\s"']*/gi;
             const urlMatches = content.match(urlPattern);
             if (urlMatches) {
               urlMatches.forEach(url => {
-                url = url.replace(/\\u0026/g, '&').replace(/\\/g, '').replace(/&amp;/g, '&');
+                // Clean the URL more thoroughly
+                url = url.replace(/\\u0026/g, '&')
+                       .replace(/\\/g, '')
+                       .replace(/&amp;/g, '&')
+                       .replace(/&quot;/g, '')
+                       .replace(/\\"/g, '');
+                
+                // Remove trailing garbage
+                url = url.split('\\')[0].split('"')[0].split("'")[0];
+                
+                // Only include if it's a valid video URL
+                if (!url.includes('video.xx.fbcdn.net') && 
+                    !url.includes('video-') && 
+                    !url.includes('scontent')) {
+                  return; // Skip if not a real Facebook CDN URL
+                }
                 
                 // Extract quality indicators
                 const qualityMatch = url.match(/(\d{3,4})p/) || 
@@ -259,12 +288,39 @@ router.post('/fetch-fb-video-data', async (req, res) => {
                 // Extract bitrate
                 const bitrateMatch = url.match(/bitrate[_=](\d+)/);
                 
+                // Determine if HD/SD from URL patterns
+                let estimatedQuality = null;
+                if (url.includes('hd_src') || url.includes('hd.mp4')) {
+                  estimatedQuality = 720;
+                } else if (url.includes('sd_src') || url.includes('sd.mp4')) {
+                  estimatedQuality = 480;
+                }
+                
                 allVideoUrls.push({
                   url: url,
-                  quality: qualityMatch ? parseInt(qualityMatch[1]) : null,
+                  quality: qualityMatch ? parseInt(qualityMatch[1]) : estimatedQuality,
                   bitrate: bitrateMatch ? parseInt(bitrateMatch[1]) : null,
                   source: 'url_pattern'
                 });
+              });
+            }
+
+            // Pattern 4b: Look for hd_src and sd_src specifically
+            const hdSrcMatch = content.match(/"hd_src"\s*:\s*"([^"]+)"/);
+            if (hdSrcMatch) {
+              allVideoUrls.push({
+                url: hdSrcMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, ''),
+                quality: 720,
+                source: 'hd_src'
+              });
+            }
+            
+            const sdSrcMatch = content.match(/"sd_src"\s*:\s*"([^"]+)"/);
+            if (sdSrcMatch) {
+              allVideoUrls.push({
+                url: sdSrcMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, ''),
+                quality: 480,
+                source: 'sd_src'
               });
             }
 
@@ -339,6 +395,12 @@ router.post('/fetch-fb-video-data', async (req, res) => {
     if (videoData.videos.length === 0) {
       throw new Error('No video URLs found in page. The video may be private or embedded differently.');
     }
+
+    // Log all found URLs for debugging
+    console.log('\n📹 All extracted URLs:');
+    videoData.videos.forEach((v, i) => {
+      console.log(`  ${i + 1}. [${v.source}] Quality: ${v.quality || 'unknown'} - ${v.url.substring(0, 80)}...`);
+    });
 
     // **INTELLIGENT VIDEO SELECTION**
     // Select the best quality video
@@ -469,18 +531,34 @@ function selectBestVideo(videos) {
       score += Math.min(video.bitrate / 100000, 50); // Cap at 50 points
     }
 
-    // Source reliability
-    if (video.source === 'video_url') score += 30;
-    else if (video.source === 'playable_url') score += 25;
-    else if (video.source === 'representations') score += 20;
-    else score += 10;
+    // Source reliability (updated priorities)
+    if (video.source === 'hd_src') score += 90;
+    else if (video.source === 'sd_src') score += 85;
+    else if (video.source === 'video_url_field') score += 80;
+    else if (video.source === 'playable_url_field') score += 75;
+    else if (video.source === 'video_element_src') score += 70;
+    else if (video.source === 'video_source_element') score += 65;
+    else if (video.source === 'src_field') score += 60;
+    else if (video.source === 'url_pattern') score += 40;
+    else if (video.source === 'representations') score += 30;
+    else if (video.source === 'data_attribute') score += 10;
+    else score += 5;
 
     // Prefer progressive over DASH
     if (video.url.includes('progressive')) score += 15;
     if (video.url.includes('dash') && !video.url.includes('progressive')) score -= 5;
 
-    // URL length heuristic (shorter URLs tend to be primary videos)
-    if (video.url.length < 500) score += 10;
+    // Facebook CDN URL validation (prefer real CDN URLs)
+    if (video.url.includes('video.xx.fbcdn.net') || 
+        video.url.includes('video-') || 
+        video.url.includes('scontent')) {
+      score += 20;
+    }
+
+    // URL characteristics
+    if (video.url.length > 200 && video.url.length < 800) score += 10; // Sweet spot for real video URLs
+    if (video.url.length < 150) score -= 10; // Too short, likely placeholder
+    if (video.url.includes('_nc_cat=')) score += 5; // Facebook URL signature
 
     return { ...video, score };
   });
