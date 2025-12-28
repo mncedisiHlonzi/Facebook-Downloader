@@ -9,16 +9,11 @@ const path = require('path');
 
 puppeteer.use(StealthPlugin());
 
-/**
- * STRATEGY: Instead of monitoring all network traffic and trying to guess which video is correct,
- * we use a DOM-based approach to extract video URLs directly from the page's JavaScript data.
- * This is far more reliable because Facebook embeds video metadata in the page source.
- */
-
 router.post('/fetch-fb-video-data', async (req, res) => {
   const { url } = req.body;
   const tempDir = path.join(__dirname, 'temp');
 
+  // Ensure temp directory exists
   if (!fsSync.existsSync(tempDir)) {
     fsSync.mkdirSync(tempDir, { recursive: true });
   }
@@ -27,8 +22,6 @@ router.post('/fetch-fb-video-data', async (req, res) => {
   let page;
   
   try {
-    console.log('🎯 Target URL:', url);
-    
     browser = await puppeteer.launch({
       headless: 'new',
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
@@ -40,60 +33,180 @@ router.post('/fetch-fb-video-data', async (req, res) => {
         '--no-first-run',
         '--no-zygote',
         '--disable-gpu',
-        '--window-size=1920,1080'
+        '--disable-web-security',
+        '--disable-features=IsolateOrigins,site-per-process,VizDisplayCompositor',
+        '--disable-blink-features=AutomationControlled',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        '--disable-extensions',
+        '--disable-software-rasterizer',
+        '--disable-translate',
+        '--disable-site-isolation-trials',
+        '--mute-audio',
+        '--window-size=375,667'
       ],
       ignoreHTTPSErrors: true,
       protocolTimeout: 180000
     });
 
     page = await browser.newPage();
-    await page.setDefaultTimeout(60000);
-    await page.setDefaultNavigationTimeout(60000);
     
-    // Enhanced stealth - remove automation indicators
+    // Set longer timeouts
+    page.setDefaultTimeout(60000);
+    page.setDefaultNavigationTimeout(60000);
+    
+    // Enhanced stealth measures
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
       Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      
       delete window.chrome;
       window.chrome = { runtime: {} };
-      
-      // Override permissions
-      const originalQuery = window.navigator.permissions.query;
-      window.navigator.permissions.query = (parameters) => (
-        parameters.name === 'notifications' ?
-          Promise.resolve({ state: Notification.permission }) :
-          originalQuery(parameters)
-      );
     });
 
-    // Use mobile user agent - often bypasses login walls better
-    await page.setUserAgent('Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36');
+    await page.setViewport({ width: 375, height: 667 });
+
+    const streams = {
+      videos: new Map(),
+      audios: [],
+      targetVideoFound: false,
+      mainVideoInteractionTime: null,
+      allVideoStreams: []
+    };
+
+    const postId = extractPostId(url);
+    const extractedAssetIds = new Set(); // Track asset IDs we find
+    console.log(`Target post ID: ${postId}`);
+
+    // Helper function to setup page handlers
+    const setupPageHandlers = (currentPage) => {
+      currentPage.on('request', (request) => {
+        const resourceType = request.resourceType();
+        const requestUrl = request.url();
+        
+        if (['document', 'xhr', 'fetch'].includes(resourceType) || 
+            requestUrl.includes('video') || 
+            requestUrl.includes('audio') ||
+            requestUrl.includes('.mp4')) {
+          request.continue();
+        } else if (['image', 'stylesheet', 'font', 'other'].includes(resourceType)) {
+          request.abort();
+        } else {
+          request.continue();
+        }
+      });
+
+      currentPage.on('response', async (response) => {
+        try {
+          const responseUrl = response.url();
+          const headers = response.headers();
+          const contentType = headers['content-type'] || '';
+          const contentLength = parseInt(headers['content-length'] || '0');
+
+          if (contentType.includes('video/mp4') || 
+              contentType.includes('video/') ||
+              responseUrl.includes('.mp4') ||
+              responseUrl.includes('video_dashinit')) {
+            
+            const quality = extractQualityImproved(responseUrl);
+            const bitrate = extractBitrate(responseUrl);
+            const assetId = extractAssetId(responseUrl);
+            
+            // Track all asset IDs we encounter
+            if (assetId) {
+              extractedAssetIds.add(assetId);
+            }
+            
+            // Check if this is the target stream
+            const isTarget = checkIfTargetStream(responseUrl, postId, extractedAssetIds);
+            
+            const streamData = {
+              url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
+              quality: quality,
+              bitrate: bitrate,
+              contentLength: contentLength,
+              isTarget: isTarget,
+              assetId: assetId,
+              timestamp: Date.now(),
+              responseOrder: streams.allVideoStreams.length,
+              isDash: responseUrl.includes('dash'),
+              isProgressive: responseUrl.includes('progressive')
+            };
+            
+            streams.allVideoStreams.push(streamData);
+            
+            if (quality || isTarget) {
+              const qualityKey = quality || 'unknown';
+              if (!streams.videos.has(qualityKey) || streams.videos.get(qualityKey).bitrate < bitrate) {
+                streams.videos.set(qualityKey, streamData);
+              }
+            }
+            
+            if (isTarget) {
+              streams.targetVideoFound = true;
+            }
+            
+            console.log(`Found video stream: ${quality || 'unknown'}p - Bitrate: ${bitrate} - Asset: ${assetId || 'none'} - Target: ${isTarget} - Progressive: ${streamData.isProgressive} - Size: ${contentLength}`);
+          }
+
+          if (contentType.includes('audio/mp4') || 
+              contentType.includes('audio/') ||
+              responseUrl.includes('audio_dashinit')) {
+            
+            const assetId = extractAssetId(responseUrl);
+            const isTarget = checkIfTargetStream(responseUrl, postId, extractedAssetIds);
+            const bitrate = extractBitrate(responseUrl);
+            
+            const audioData = {
+              url: responseUrl.split('&bytestart=')[0].split('&range=')[0],
+              isTarget: isTarget,
+              assetId: assetId,
+              bitrate: bitrate,
+              timestamp: Date.now(),
+              responseOrder: streams.audios.length
+            };
+            
+            if (!streams.audios.find(a => a.url === audioData.url)) {
+              streams.audios.push(audioData);
+              console.log(`Found audio stream: Asset: ${assetId || 'none'} - Target: ${isTarget} - Bitrate: ${bitrate}`);
+            }
+          }
+        } catch (err) {
+          console.error('Response handler error:', err);
+        }
+      });
+    };
+
+    await page.setRequestInterception(true);
+    setupPageHandlers(page);
+
+    await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1');
     
     await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-      'sec-ch-ua-mobile': '?1',
-      'sec-ch-ua-platform': '"Android"',
-      'Upgrade-Insecure-Requests': '1'
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate',
+      'DNT': '1',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1',
+      'Sec-Fetch-Dest': 'document',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Site': 'none'
     });
 
-    // Try multiple URL formats to bypass login walls
-    const urlVariants = [
+    const urlsToTry = [
       url,
-      url.replace('www.facebook.com', 'm.facebook.com'),
-      url.replace('facebook.com', 'mbasic.facebook.com'),
-      url.replace('/share/v/', '/reel/'),
-      url.replace('/share/v/', '/watch/?v=')
+      convertToMobileUrl(url),
+      convertToDesktopUrl(url)
     ];
 
     let pageLoaded = false;
-    let currentUrl = url;
-
-    for (const testUrl of urlVariants) {
+    
+    for (const testUrl of urlsToTry) {
       try {
-        console.log(`📄 Trying: ${testUrl.substring(0, 60)}...`);
+        console.log(`Trying URL: ${testUrl}`);
         
         const response = await page.goto(testUrl, {
           waitUntil: 'domcontentloaded',
@@ -101,390 +214,517 @@ router.post('/fetch-fb-video-data', async (req, res) => {
         });
 
         if (!response || response.status() === 404) {
-          console.log('   ❌ 404 error');
+          console.log(`Got 404 or no response for ${testUrl}`);
           continue;
         }
 
-        // Wait for content
-        await new Promise(resolve => setTimeout(resolve, 4000));
+        await new Promise(resolve => setTimeout(resolve, 5000));
 
-        // Check page state
         const pageCheck = await page.evaluate(() => {
           const bodyText = document.body.innerText.toLowerCase();
-          const hasVideo = document.querySelector('video') !== null ||
-                          bodyText.includes('video') ||
-                          document.querySelector('[role="main"]') !== null;
+          const isLoginPage = bodyText.includes('log in to facebook') || 
+                             bodyText.includes('sign up for facebook') ||
+                             document.querySelector('input[name="email"]') !== null;
+          const isErrorPage = bodyText.includes('content not found') ||
+                             bodyText.includes('this content isn\'t available') ||
+                             bodyText.includes('page not found');
           
           return {
-            needsLogin: bodyText.includes('log in to facebook') || 
-                       bodyText.includes('sign up for facebook') ||
-                       (document.querySelector('input[name="email"]') !== null && !hasVideo),
-            isError: bodyText.includes('content not found') ||
-                    bodyText.includes('this content isn\'t available') ||
-                    bodyText.includes('page not found'),
-            hasContent: hasVideo || bodyText.length > 500
+            isLoginPage,
+            isErrorPage,
+            hasVideo: document.querySelectorAll('video').length > 0 || 
+                     document.querySelector('[data-testid*="video"]') !== null ||
+                     document.querySelector('.videoStage') !== null,
+            url: window.location.href
           };
         });
 
-        console.log(`   Login: ${pageCheck.needsLogin}, Error: ${pageCheck.isError}, Content: ${pageCheck.hasContent}`);
+        console.log('Page check:', pageCheck);
 
-        if (pageCheck.isError) {
-          console.log('   ❌ Error page detected');
+        if (pageCheck.isLoginPage) {
+          console.log('Detected login page, trying next URL...');
           continue;
         }
 
-        if (pageCheck.needsLogin && !pageCheck.hasContent) {
-          console.log('   ❌ Login wall');
+        if (pageCheck.isErrorPage) {
+          console.log('Detected error page, trying next URL...');
           continue;
         }
 
-        // Success - we have content
-        console.log('   ✅ Page loaded successfully');
-        pageLoaded = true;
-        currentUrl = testUrl;
-        break;
-
+        if (pageCheck.hasVideo) {
+          console.log(`Successfully loaded video page with URL: ${testUrl}`);
+          pageLoaded = true;
+          break;
+        } else {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          
+          const recheckVideo = await page.evaluate(() => {
+            return document.querySelectorAll('video').length > 0;
+          });
+          
+          if (recheckVideo) {
+            console.log(`Video found after additional wait: ${testUrl}`);
+            pageLoaded = true;
+            break;
+          }
+        }
       } catch (error) {
-        console.log(`   ❌ Failed: ${error.message}`);
+        console.log(`Failed to load ${testUrl}:`, error.message);
+        
+        if (error.message.includes('detached')) {
+          console.log('Frame detached, creating new page...');
+          try {
+            await page.close();
+          } catch (e) {}
+          
+          page = await browser.newPage();
+          page.setDefaultTimeout(60000);
+          page.setDefaultNavigationTimeout(60000);
+          
+          await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            delete window.chrome;
+            window.chrome = { runtime: {} };
+          });
+
+          await page.setViewport({ width: 375, height: 667 });
+          await page.setRequestInterception(true);
+          setupPageHandlers(page);
+
+          await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1');
+          
+          await page.setExtraHTTPHeaders({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none'
+          });
+        }
+        
         continue;
       }
     }
 
     if (!pageLoaded) {
-      throw new Error('Could not access video. It may be private, deleted, or require login. Try a different video URL format.');
+      throw new Error('Could not load video page with any URL variant. The video may be private, deleted, or require login.');
     }
 
-    console.log(`✅ Successfully loaded: ${currentUrl.substring(0, 60)}...`);
-
-    console.log('🔍 Extracting video data from page...');
-
-    // Wait a bit more and try to interact with video to load higher quality streams
+    // Enhanced video interaction with quality triggering
     try {
-      await page.evaluate(() => {
-        const video = document.querySelector('video');
-        if (video) {
-          video.play().catch(() => {});
-          setTimeout(() => video.pause(), 100);
-        }
-      });
-      await new Promise(resolve => setTimeout(resolve, 2000));
-    } catch (e) {
-      // Continue anyway
-    }
-
-    // **CORE EXTRACTION LOGIC**
-    // Facebook embeds video data in <script> tags as JSON objects
-    const videoData = await page.evaluate(() => {
-      const extractFromScripts = () => {
-        const scripts = Array.from(document.querySelectorAll('script'));
-        let allVideoUrls = [];
-        let metadata = {
-          title: null,
-          thumbnail: null,
-          duration: null
-        };
-
-        // Extract metadata from meta tags first
-        const getMeta = (property) => {
-          const meta = document.querySelector(`meta[property="${property}"], meta[name="${property}"]`);
-          return meta ? meta.content : null;
-        };
-
-        metadata.title = getMeta('og:title') || 
-                        getMeta('twitter:title') ||
-                        document.title.replace(/\s*\|\s*Facebook\s*$/, '').trim() ||
-                        'Facebook Video';
-        metadata.thumbnail = getMeta('og:image') || getMeta('twitter:image');
-        metadata.duration = getMeta('og:video:duration') || getMeta('video:duration');
-
-        // **METHOD 1: Check video element src directly (mobile pages)**
-        const videoElements = document.querySelectorAll('video');
-        videoElements.forEach(video => {
-          if (video.src && video.src.includes('video')) {
-            allVideoUrls.push({
-              url: video.src,
-              quality: video.videoHeight || null,
-              source: 'video_element_src'
-            });
-          }
+      const videoInfo = await page.evaluate((targetPostId) => {
+        const findMainVideo = () => {
+          const videos = Array.from(document.querySelectorAll('video'));
+          console.log(`Found ${videos.length} video elements on page`);
           
-          // Check source elements
-          const sources = video.querySelectorAll('source');
-          sources.forEach(source => {
-            if (source.src && source.src.includes('video')) {
-              allVideoUrls.push({
-                url: source.src,
-                quality: parseInt(source.getAttribute('data-quality')) || null,
-                source: 'video_source_element'
-              });
-            }
-          });
-        });
-
-        // **METHOD 2: Extract from script tags**
-        scripts.forEach(script => {
-          const content = script.textContent || script.innerText || '';
+          if (videos.length === 0) return null;
+          if (videos.length === 1) return { video: videos[0], reason: 'only-video', score: 100 };
           
-          try {
-            // Pattern 1: video_url fields
-            const videoUrlPattern = /"video_url"\s*:\s*"([^"]+)"/g;
-            let match;
-            while ((match = videoUrlPattern.exec(content)) !== null) {
-              allVideoUrls.push({
-                url: match[1].replace(/\\u0026/g, '&').replace(/\\/g, ''),
-                quality: null,
-                source: 'video_url_field'
-              });
-            }
-
-            // Pattern 2: playable_url fields
-            const playablePattern = /"playable_url"\s*:\s*"([^"]+)"/g;
-            while ((match = playablePattern.exec(content)) !== null) {
-              allVideoUrls.push({
-                url: match[1].replace(/\\u0026/g, '&').replace(/\\/g, ''),
-                quality: null,
-                source: 'playable_url_field'
-              });
-            }
-
-            // Pattern 3: src fields in video data
-            const srcPattern = /"src"\s*:\s*"(https:\/\/[^"]*video[^"]*\.mp4[^"]*)"/g;
-            while ((match = srcPattern.exec(content)) !== null) {
-              allVideoUrls.push({
-                url: match[1].replace(/\\u0026/g, '&').replace(/\\/g, ''),
-                quality: null,
-                source: 'src_field'
-              });
-            }
-
-            // Pattern 4: Direct URLs with context - IMPROVED
-            const urlPattern = /https:\/\/[^\s"']*video[^\s"']*(\.mp4|dash|progressive)[^\s"']*/gi;
-            const urlMatches = content.match(urlPattern);
-            if (urlMatches) {
-              urlMatches.forEach(url => {
-                // Clean the URL more thoroughly
-                url = url.replace(/\\u0026/g, '&')
-                       .replace(/\\/g, '')
-                       .replace(/&amp;/g, '&')
-                       .replace(/&quot;/g, '')
-                       .replace(/\\"/g, '');
-                
-                // Remove trailing garbage
-                url = url.split('\\')[0].split('"')[0].split("'")[0];
-                
-                // Only include if it's a valid video URL
-                if (!url.includes('video.xx.fbcdn.net') && 
-                    !url.includes('video-') && 
-                    !url.includes('scontent')) {
-                  return; // Skip if not a real Facebook CDN URL
-                }
-                
-                // Extract quality indicators
-                const qualityMatch = url.match(/(\d{3,4})p/) || 
-                                    url.match(/hd_(\d{3,4})/) ||
-                                    url.match(/quality[_=](\d{3,4})/) ||
-                                    url.match(/height[_=](\d{3,4})/);
-                
-                // Extract bitrate
-                const bitrateMatch = url.match(/bitrate[_=](\d+)/);
-                
-                // Determine if HD/SD from URL patterns
-                let estimatedQuality = null;
-                if (url.includes('hd_src') || url.includes('hd.mp4')) {
-                  estimatedQuality = 720;
-                } else if (url.includes('sd_src') || url.includes('sd.mp4')) {
-                  estimatedQuality = 480;
-                }
-                
-                allVideoUrls.push({
-                  url: url,
-                  quality: qualityMatch ? parseInt(qualityMatch[1]) : estimatedQuality,
-                  bitrate: bitrateMatch ? parseInt(bitrateMatch[1]) : null,
-                  source: 'url_pattern'
-                });
-              });
-            }
-
-            // Pattern 4b: Look for hd_src and sd_src specifically
-            const hdSrcMatch = content.match(/"hd_src"\s*:\s*"([^"]+)"/);
-            if (hdSrcMatch) {
-              allVideoUrls.push({
-                url: hdSrcMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, ''),
-                quality: 720,
-                source: 'hd_src'
-              });
-            }
+          const videoAnalysis = videos.map(video => {
+            const rect = video.getBoundingClientRect();
+            const area = rect.width * rect.height;
             
-            const sdSrcMatch = content.match(/"sd_src"\s*:\s*"([^"]+)"/);
-            if (sdSrcMatch) {
-              allVideoUrls.push({
-                url: sdSrcMatch[1].replace(/\\u0026/g, '&').replace(/\\/g, ''),
-                quality: 480,
-                source: 'sd_src'
-              });
-            }
-
-            // Pattern 5: representations array (DASH)
-            const repPattern = /"representations"\s*:\s*\[(.*?)\]/gs;
-            const repMatches = content.match(repPattern);
-            if (repMatches) {
-              repMatches.forEach(match => {
-                try {
-                  const arrayContent = match.match(/\[(.*)\]/s)[1];
-                  const repObjects = arrayContent.match(/\{[^{}]*\}/g);
-                  
-                  if (repObjects) {
-                    repObjects.forEach(obj => {
-                      try {
-                        const parsed = JSON.parse(obj);
-                        if (parsed.base_url && parsed.base_url.includes('video')) {
-                          allVideoUrls.push({
-                            url: parsed.base_url.replace(/\\u0026/g, '&').replace(/\\/g, ''),
-                            quality: parsed.height || null,
-                            bitrate: parsed.bandwidth || null,
-                            source: 'representations'
-                          });
-                        }
-                      } catch (e) {}
-                    });
-                  }
-                } catch (e) {}
-              });
-            }
-
-            // Pattern 6: Mobile-specific data-video-url attributes
-            const dataVideoPattern = /data-video-url="([^"]+)"/g;
-            while ((match = dataVideoPattern.exec(content)) !== null) {
-              allVideoUrls.push({
-                url: match[1].replace(/&amp;/g, '&'),
-                quality: null,
-                source: 'data_video_url'
-              });
-            }
-
-          } catch (error) {
-            // Continue to next script
-          }
-        });
-
-        // **METHOD 3: Check for data attributes on page**
-        const videoContainers = document.querySelectorAll('[data-video-url], [data-src]');
-        videoContainers.forEach(container => {
-          const dataUrl = container.getAttribute('data-video-url') || 
-                         container.getAttribute('data-src');
-          if (dataUrl && dataUrl.includes('video')) {
-            allVideoUrls.push({
-              url: dataUrl.replace(/&amp;/g, '&'),
-              quality: null,
-              source: 'data_attribute'
-            });
-          }
-        });
-
-        return {
-          videos: allVideoUrls,
-          metadata: metadata
+            // Check if in main content area
+            const isMainContent = !!(
+              video.closest('article') || 
+              video.closest('[data-pagelet*="FeedUnit"]') ||
+              video.closest('[role="main"]') ||
+              video.closest('main') ||
+              video.closest('[data-pagelet*="PermalinkPost"]') ||
+              video.closest('[data-pagelet="Watch"]')
+            );
+            
+            // Check if in sidebar/suggested
+            const isSuggested = !!(
+              video.closest('[data-pagelet*="RightRail"]') ||
+              video.closest('[data-pagelet*="Suggested"]') ||
+              video.closest('.uiSideNav') ||
+              video.closest('[aria-label*="Suggested"]') ||
+              rect.width < 250  // Sidebar videos are typically smaller
+            );
+            
+            // Check viewport position
+            const viewportHeight = window.innerHeight;
+            const isInViewport = rect.top >= 0 && rect.bottom <= viewportHeight;
+            const distanceFromTop = Math.abs(rect.top);
+            
+            // Check for post description (strong indicator of main video)
+            const container = video.closest('div[data-pagelet]') || 
+                             video.closest('article') || 
+                             video.parentElement;
+            const hasDescription = container && !!(
+              container.querySelector('[data-testid*="post-content"]') ||
+              container.querySelector('.userContent') ||
+              container.querySelector('[data-ad-preview="message"]')
+            );
+            
+            // Check if video has controls or is autoplay
+            const hasControls = video.hasAttribute('controls');
+            const isAutoplay = video.hasAttribute('autoplay') || video.autoplay;
+            
+            // Check z-index and visibility
+            const style = window.getComputedStyle(video);
+            const zIndex = parseInt(style.zIndex) || 0;
+            const isVisible = style.display !== 'none' && 
+                             style.visibility !== 'hidden' &&
+                             style.opacity !== '0';
+            
+            return {
+              video,
+              area,
+              isMainContent,
+              isSuggested,
+              distanceFromTop,
+              hasDescription,
+              isInViewport,
+              hasControls,
+              isAutoplay,
+              zIndex,
+              isVisible,
+              score: 0
+            };
+          });
+          
+          // Calculate scores
+          videoAnalysis.forEach(analysis => {
+            let score = 0;
+            
+            // Area scoring (heavily weighted)
+            if (analysis.area > 100000) score += 10;
+            else if (analysis.area > 50000) score += 7;
+            else if (analysis.area > 20000) score += 4;
+            else if (analysis.area > 5000) score += 1;
+            else score -= 5; // Penalize very small videos
+            
+            // Content area (critical)
+            if (analysis.isMainContent) score += 15;
+            if (analysis.isSuggested) score -= 20; // Heavy penalty
+            
+            // Viewport position
+            if (analysis.isInViewport) score += 5;
+            if (analysis.distanceFromTop < 300) score += 5;
+            else if (analysis.distanceFromTop < 800) score += 2;
+            
+            // Has description (strong indicator)
+            if (analysis.hasDescription) score += 10;
+            
+            // Controls and autoplay
+            if (analysis.hasControls) score += 3;
+            if (analysis.isAutoplay) score += 2;
+            
+            // Visibility and z-index
+            if (!analysis.isVisible) score -= 50; // Eliminate hidden videos
+            if (analysis.zIndex > 0) score += 2;
+            
+            analysis.score = score;
+          });
+          
+          // Sort by score
+          videoAnalysis.sort((a, b) => b.score - a.score);
+          
+          // Log top 3 candidates
+          console.log('Top video candidates:', videoAnalysis.slice(0, 3).map(v => ({
+            score: v.score,
+            area: v.area,
+            isMainContent: v.isMainContent,
+            isSuggested: v.isSuggested,
+            hasDescription: v.hasDescription
+          })));
+          
+          return { 
+            video: videoAnalysis[0].video, 
+            reason: 'enhanced-context-analysis',
+            score: videoAnalysis[0].score
+          };
         };
+
+        const result = findMainVideo();
+        const targetVideo = result?.video;
+        
+        if (targetVideo) {
+          targetVideo.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          targetVideo.setAttribute('data-target-video', 'true');
+          
+          setTimeout(() => {
+            try {
+              targetVideo.play().catch(() => {});
+              targetVideo.click();
+              
+              if (targetVideo.requestFullscreen) {
+                targetVideo.requestFullscreen().then(() => {
+                  setTimeout(() => {
+                    document.exitFullscreen().catch(() => {});
+                  }, 500);
+                }).catch(() => {});
+              }
+              
+              targetVideo.currentTime = Math.min(5, targetVideo.duration * 0.1);
+              
+              const container = targetVideo.closest('div[data-pagelet]') || 
+                              targetVideo.closest('article') || 
+                              targetVideo.closest('div');
+              if (container) {
+                const playButtons = container.querySelectorAll('[data-testid*="play"], .playButton, [aria-label*="Play"], [role="button"]');
+                playButtons.forEach(button => {
+                  if (button.offsetParent !== null) {
+                    button.click();
+                  }
+                });
+                
+                const qualityButtons = container.querySelectorAll('[aria-label*="quality"], [aria-label*="HD"], [data-testid*="quality"]');
+                qualityButtons.forEach(button => {
+                  if (button.offsetParent !== null) {
+                    button.click();
+                  }
+                });
+              }
+              
+              targetVideo.preload = 'metadata';
+              targetVideo.muted = false;
+              targetVideo.dispatchEvent(new Event('loadstart'));
+              targetVideo.dispatchEvent(new Event('canplay'));
+              targetVideo.dispatchEvent(new Event('playing'));
+              
+            } catch (e) {
+              console.log('Error during video interaction:', e);
+            }
+          }, 1000);
+          
+          return {
+            found: true,
+            method: result.reason,
+            score: result.score
+          };
+        }
+        
+        return { found: false };
+        
+      }, postId);
+      
+      streams.mainVideoInteractionTime = Date.now();
+      
+      await new Promise(resolve => setTimeout(resolve, 12000));
+      
+    } catch (err) {
+      console.log('Could not interact with video elements:', err.message);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 10000));
+
+    const metadata = await page.evaluate(() => {
+      const getMetaContent = (property) => {
+        const meta = document.querySelector(`meta[property="${property}"], meta[name="${property}"]`);
+        return meta ? meta.content : null;
       };
-
-      return extractFromScripts();
+      
+      let title = getMetaContent('og:title') || 
+                  document.title ||
+                  document.querySelector('h1')?.textContent ||
+                  document.querySelector('[data-testid*="post"] h3')?.textContent ||
+                  'Facebook Video';
+      
+      title = title.replace(/\s*\|\s*Facebook\s*$/, '').trim();
+      
+      return {
+        title: title,
+        thumbnail: getMetaContent('og:image') || 
+                  getMetaContent('twitter:image') ||
+                  document.querySelector('video')?.poster,
+        duration: getMetaContent('og:video:duration') || 
+                 getMetaContent('video:duration'),
+        description: getMetaContent('og:description') || 
+                    getMetaContent('description')
+      };
     });
 
-    console.log(`📦 Found ${videoData.videos.length} video URLs`);
+    console.log('All video streams found:', streams.allVideoStreams.map(s => ({
+      quality: s.quality,
+      bitrate: s.bitrate,
+      isTarget: s.isTarget,
+      isProgressive: s.isProgressive,
+      contentLength: s.contentLength
+    })));
 
-    if (videoData.videos.length === 0) {
-      throw new Error('No video URLs found in page. The video may be private or embedded differently.');
-    }
+    let bestVideoEntry = selectBestVideoStream(streams, postId);
+    let bestAudioUrl = selectBestAudioStream(streams, postId);
 
-    // Log all found URLs for debugging
-    console.log('\n📹 All extracted URLs:');
-    videoData.videos.forEach((v, i) => {
-      console.log(`  ${i + 1}. [${v.source}] Quality: ${v.quality || 'unknown'} - ${v.url.substring(0, 80)}...`);
-    });
-
-    // **INTELLIGENT VIDEO SELECTION**
-    // Select the best quality video
-    const bestVideo = selectBestVideo(videoData.videos);
-    
-    if (!bestVideo) {
-      throw new Error('Could not determine best video quality');
-    }
-
-    console.log(`✅ Selected: ${bestVideo.quality || 'unknown'}p - ${bestVideo.source}`);
-    console.log(`🔗 URL: ${bestVideo.url.substring(0, 100)}...`);
-
-    // Try to find matching audio stream
-    const audioUrl = await page.evaluate(() => {
-      const scripts = Array.from(document.querySelectorAll('script'));
-      let audioUrls = [];
-
-      scripts.forEach(script => {
-        const content = script.textContent || '';
+    if (!bestVideoEntry) {
+      console.log('No streams found via network monitoring, trying alternative method...');
+      
+      const alternativeStreams = await page.evaluate((targetPostId) => {
+        const scripts = Array.from(document.querySelectorAll('script'));
+        const videoData = [];
         
-        // Look for audio URLs
-        const audioPattern = /https:\/\/[^\s"']*audio[^\s"']*(\.mp4|dashinit)[^\s"']*/gi;
-        const matches = content.match(audioPattern);
+        scripts.forEach(script => {
+          const content = script.textContent || '';
+          
+          const patterns = [
+            /https:\/\/[^"]*\.mp4[^"]*/g,
+            /https:\/\/[^"]*video[^"]*\.mp4[^"]*/g,
+            /"video_url":"([^"]+)"/g,
+            /"playable_url":"([^"]+)"/g,
+            /"src":"([^"]+\.mp4[^"]*)"/g
+          ];
+          
+          patterns.forEach(pattern => {
+            const matches = content.match(pattern);
+            if (matches) {
+              matches.forEach(match => {
+                let url = match;
+                if (url.startsWith('"')) {
+                  url = match.match(/"([^"]+)"/)?.[1] || match;
+                }
+                
+                if (url.includes('video') || url.includes('.mp4')) {
+                  videoData.push({ 
+                    url: url.replace(/\\u0026/g, '&').replace(/\\/g, ''),
+                    quality: null,
+                    bitrate: 0,
+                    isTarget: false
+                  });
+                }
+              });
+            }
+          });
+        });
         
-        if (matches) {
-          matches.forEach(url => {
-            url = url.replace(/\\u0026/g, '&').replace(/\\/g, '');
-            audioUrls.push(url);
+        return videoData;
+      }, postId);
+      
+      console.log('Alternative streams found:', alternativeStreams.length);
+      
+      alternativeStreams.forEach(streamData => {
+        const quality = extractQualityImproved(streamData.url);
+        const bitrate = extractBitrate(streamData.url);
+        const assetId = extractAssetId(streamData.url);
+        const isTarget = checkIfTargetStream(streamData.url, postId, extractedAssetIds);
+        
+        streamData.quality = quality;
+        streamData.bitrate = bitrate;
+        streamData.assetId = assetId;
+        streamData.isTarget = isTarget;
+        
+        if (assetId) {
+          extractedAssetIds.add(assetId);
+        }
+        
+        const qualityKey = quality || 'unknown';
+        if (!streams.videos.has(qualityKey) || 
+            (streams.videos.get(qualityKey).bitrate || 0) < (bitrate || 0)) {
+          streams.videos.set(qualityKey, {
+            url: streamData.url,
+            quality: quality,
+            bitrate: bitrate,
+            assetId: assetId,
+            isTarget: isTarget,
+            contentLength: 0,
+            timestamp: Date.now(),
+            responseOrder: 0,
+            isDash: streamData.url.includes('dash'),
+            isProgressive: streamData.url.includes('progressive')
           });
         }
       });
+      
+      bestVideoEntry = selectBestVideoStream(streams, postId);
+    }
 
-      return audioUrls.length > 0 ? audioUrls[0] : null;
-    });
+    // Verify stream selection
+    const isVerified = verifyStreamSelection(bestVideoEntry, streams, postId);
 
-    // Prepare response
-    const responseData = {
-      name: videoData.metadata.title,
-      thumbnail: videoData.metadata.thumbnail || '../assets/images/defaultThumbnail.png',
-      videoUrl: bestVideo.url,
-      audioUrl: audioUrl,
-      quality: bestVideo.quality ? `${bestVideo.quality}p` : 'HD',
-      duration: videoData.metadata.duration,
-      description: videoData.metadata.description || '',
-      confidence: 'high',
-      debug: {
-        totalVideosFound: videoData.videos.length,
-        selectedQuality: bestVideo.quality,
-        selectedSource: bestVideo.source,
-        hasAudio: !!audioUrl
-      }
-    };
+    const videoUrl = bestVideoEntry ? (bestVideoEntry.url || bestVideoEntry[1]?.url) : null;
+    const quality = bestVideoEntry ? (bestVideoEntry.quality || bestVideoEntry[0]) : null;
 
-    // If we have both video and audio, try to merge
-    if (bestVideo.url && audioUrl) {
+    if (!videoUrl) {
+      return res.status(404).json({ 
+        status: 'error', 
+        message: 'No video streams found. The video may be private, deleted, or Facebook has changed their structure.',
+        debug: {
+          postId: postId,
+          totalStreamsFound: streams.videos.size,
+          allStreamsCount: streams.allVideoStreams.length,
+          targetVideoFound: streams.targetVideoFound
+        }
+      });
+    }
+
+    console.log(`Selected video URL: ${videoUrl} (Quality: ${quality}p, Bitrate: ${bestVideoEntry.bitrate || 'unknown'})`);
+    console.log(`Selection confidence: ${bestVideoEntry.isTarget ? 'HIGH' : isVerified ? 'MEDIUM' : 'LOW'}`);
+
+    if (videoUrl && bestAudioUrl) {
       try {
-        console.log('🎵 Merging video and audio...');
-        const mergedPath = await mergeStreams(bestVideo.url, audioUrl, tempDir);
+        console.log('Attempting to merge video and audio streams...');
+        const mergedPath = await mergeStreams(videoUrl, bestAudioUrl, tempDir);
         const finalUrl = `${req.protocol}://${req.get('host')}/temp/${path.basename(mergedPath)}`;
-        
-        responseData.videoUrl = finalUrl;
-        responseData.quality = 'Merged HD';
-        responseData.debug.merged = true;
+
+        return res.json({
+          status: 'success',
+          data: {
+            name: metadata.title,
+            thumbnail: metadata.thumbnail,
+            videoUrl: finalUrl,
+            quality: 'Merged HD',
+            duration: metadata.duration,
+            description: metadata.description,
+            confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low',
+            debug: {
+              postId: postId,
+              targetFound: streams.targetVideoFound,
+              merged: true,
+              originalQuality: quality,
+              confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low'
+            }
+          }
+        });
       } catch (mergeError) {
-        console.error('❌ Merge failed:', mergeError.message);
-        // Continue with video-only
+        console.error('Merge failed, sending video stream only:', mergeError);
       }
     }
 
     return res.json({
       status: 'success',
-      data: responseData
+      data: {
+        name: metadata.title,
+        thumbnail: metadata.thumbnail,
+        videoUrl: videoUrl,
+        audioUrl: bestAudioUrl,
+        quality: quality ? `${quality}p` : 'Available',
+        duration: metadata.duration,
+        description: metadata.description,
+        confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low',
+        debug: {
+          postId: postId,
+          targetFound: streams.targetVideoFound,
+          availableQualities: Array.from(streams.videos.keys()).sort((a, b) => 
+            (parseInt(b) || 0) - (parseInt(a) || 0)
+          ),
+          selectedBitrate: bestVideoEntry?.bitrate,
+          confidence: bestVideoEntry.isTarget ? 'high' : isVerified ? 'medium' : 'low'
+        }
+      }
     });
 
   } catch (err) {
-    console.error('❌ Scraping error:', err);
+    console.error('Scraping error:', err);
     return res.status(500).json({
       status: 'error',
-      message: err.message || 'Failed to fetch video data',
-      debug: { url }
+      message: `Scraping failed: ${err.message}`,
+      debug: {
+        url: url,
+        postId: extractPostId(url)
+      }
     });
   } finally {
     if (page) {
-      try { await page.close(); } catch (e) {}
+      try {
+        await page.close();
+      } catch (e) {}
     }
     if (browser) {
       await browser.close();
@@ -492,103 +732,709 @@ router.post('/fetch-fb-video-data', async (req, res) => {
   }
 });
 
-/**
- * Select the best quality video from available options
- */
-function selectBestVideo(videos) {
-  if (videos.length === 0) return null;
-  if (videos.length === 1) return videos[0];
-
-  // Remove duplicates based on URL
-  const uniqueVideos = [];
-  const seenUrls = new Set();
-  
-  videos.forEach(video => {
-    const baseUrl = video.url.split('?')[0].split('&bytestart=')[0];
-    if (!seenUrls.has(baseUrl)) {
-      seenUrls.add(baseUrl);
-      uniqueVideos.push(video);
-    }
-  });
-
-  console.log(`🎯 Unique videos after deduplication: ${uniqueVideos.length}`);
-
-  // Score each video
-  const scoredVideos = uniqueVideos.map(video => {
-    let score = 0;
+// IMPROVED POST ID EXTRACTION
+function extractPostId(url) {
+  try {
+    // First, try to get the full URL path for better context
+    const urlObj = new URL(url);
+    const pathname = urlObj.pathname;
     
-    // Quality scoring (highest priority)
-    if (video.quality) {
-      if (video.quality >= 1080) score += 100;
-      else if (video.quality >= 720) score += 80;
-      else if (video.quality >= 480) score += 60;
-      else if (video.quality >= 360) score += 40;
-      else score += 20;
+    // Extended patterns with priority order
+    const patterns = [
+      // Highest priority - most specific patterns
+      /\/reel\/(\d+)/,                    // Reels format
+      /\/videos\/(\d+)/,                  // Standard video format
+      /\/watch\/?\?v=(\d+)/,              // Watch page format
+      /\/video\.php\?v=(\d+)/,            // Old format
+      
+      // Medium priority - share links
+      /\/share\/v\/([a-zA-Z0-9_-]+)/,    // New share format
+      /\/share\/r\/([a-zA-Z0-9_-]+)/,    // Reel share format
+      
+      // Lower priority - post formats
+      /\/posts\/([a-zA-Z0-9_-]+)/,       // Post format
+      /story_fbid=([a-zA-Z0-9_-]+)/,     // Story format
+      /fbid=([a-zA-Z0-9_-]+)/,           // FBID param
+      /permalink\.php.*story_fbid=([a-zA-Z0-9_-]+)/, // Permalink
+      
+      // Fallback - any long number in path
+      /\/([0-9]{10,})/
+    ];
+    
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[1]) {
+        console.log(`Post ID extracted via pattern: ${pattern}, ID: ${match[1]}`);
+        return match[1];
+      }
     }
-
-    // Bitrate scoring
-    if (video.bitrate) {
-      score += Math.min(video.bitrate / 100000, 50); // Cap at 50 points
+    
+    // Check URL parameters
+    const params = urlObj.searchParams;
+    const paramPriority = ['v', 'video_id', 'story_fbid', 'fbid', 'id'];
+    
+    for (const param of paramPriority) {
+      const value = params.get(param);
+      if (value && value.length >= 8) {
+        console.log(`Post ID extracted from param ${param}: ${value}`);
+        return value;
+      }
     }
-
-    // Source reliability (updated priorities)
-    if (video.source === 'hd_src') score += 90;
-    else if (video.source === 'sd_src') score += 85;
-    else if (video.source === 'video_url_field') score += 80;
-    else if (video.source === 'playable_url_field') score += 75;
-    else if (video.source === 'video_element_src') score += 70;
-    else if (video.source === 'video_source_element') score += 65;
-    else if (video.source === 'src_field') score += 60;
-    else if (video.source === 'url_pattern') score += 40;
-    else if (video.source === 'representations') score += 30;
-    else if (video.source === 'data_attribute') score += 10;
-    else score += 5;
-
-    // Prefer progressive over DASH
-    if (video.url.includes('progressive')) score += 15;
-    if (video.url.includes('dash') && !video.url.includes('progressive')) score -= 5;
-
-    // Facebook CDN URL validation (prefer real CDN URLs)
-    if (video.url.includes('video.xx.fbcdn.net') || 
-        video.url.includes('video-') || 
-        video.url.includes('scontent')) {
-      score += 20;
+    
+    // Last resort - extract from full URL path
+    const segments = pathname.split('/').filter(s => s.length > 0);
+    for (const segment of segments) {
+      if (/^[0-9]{10,}$/.test(segment)) {
+        console.log(`Post ID extracted from path segment: ${segment}`);
+        return segment;
+      }
     }
-
-    // URL characteristics
-    if (video.url.length > 200 && video.url.length < 800) score += 10; // Sweet spot for real video URLs
-    if (video.url.length < 150) score -= 10; // Too short, likely placeholder
-    if (video.url.includes('_nc_cat=')) score += 5; // Facebook URL signature
-
-    return { ...video, score };
-  });
-
-  // Sort by score (highest first)
-  scoredVideos.sort((a, b) => b.score - a.score);
-
-  // Log top 3 candidates
-  console.log('🏆 Top 3 candidates:');
-  scoredVideos.slice(0, 3).forEach((v, i) => {
-    console.log(`  ${i + 1}. Quality: ${v.quality || 'unknown'}p, Score: ${v.score.toFixed(1)}, Source: ${v.source}`);
-  });
-
-  return scoredVideos[0];
+    
+    console.warn('Could not extract post ID from URL');
+    return null;
+  } catch (error) {
+    console.error('Error extracting post ID:', error);
+    return null;
+  }
 }
 
-/**
- * Merge video and audio streams using FFmpeg
- */
+function extractQualityImproved(url) {
+  try {
+    const efgMatch = url.match(/efg=([^&]+)/);
+    if (efgMatch) {
+      try {
+        const decodedEfg = decodeURIComponent(efgMatch[1]);
+        const efgData = JSON.parse(atob(decodedEfg));
+        
+        if (efgData.vencode_tag) {
+          const qualityMatch = efgData.vencode_tag.match(/(\d+)p/);
+          if (qualityMatch) {
+            return parseInt(qualityMatch[1]);
+          }
+        }
+      } catch (e) {}
+    }
+    
+    const tagMatch = url.match(/tag=([^&]+)/);
+    if (tagMatch) {
+      const tag = decodeURIComponent(tagMatch[1]);
+      const qualityMatch = tag.match(/(\d+)p/);
+      if (qualityMatch) {
+        return parseInt(qualityMatch[1]);
+      }
+    }
+    
+    const bitrateMatch = url.match(/bitrate=(\d+)/);
+    if (bitrateMatch) {
+      const bitrate = parseInt(bitrateMatch[1]);
+      if (bitrate > 3000000) return 1080;
+      if (bitrate > 1500000) return 720;
+      if (bitrate > 800000) return 480;
+      if (bitrate > 400000) return 360;
+      return 240;
+    }
+    
+    const patterns = [
+      /(\d+)p\.mp4/,
+      /height_(\d+)/,
+      /(\d+)p/,
+      /hd_(\d+)/,
+      /quality_(\d+)/,
+      /res_(\d+)/,
+      /f(\d+)\//
+    ];
+    
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match) {
+        let quality = parseInt(match[1]);
+        if (pattern.source === 'f(\\d+)\\/') {
+          const fNumber = quality;
+          if (fNumber === 4) quality = 2160;
+          else if (fNumber === 3) quality = 1080;
+          else if (fNumber === 2) quality = 720;
+          else if (fNumber === 1) quality = 480;
+          else if (fNumber === 0) quality = 360;
+        }
+        return quality;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error extracting quality:', error);
+    return null;
+  }
+}
+
+function extractBitrate(url) {
+  const bitrateMatch = url.match(/bitrate=(\d+)/);
+  return bitrateMatch ? parseInt(bitrateMatch[1]) : 0;
+}
+
+// NEW: Extract asset ID from stream URL
+function extractAssetId(url) {
+  try {
+    // Check efg parameter for xpv_asset_id
+    const efgMatch = url.match(/efg=([^&]+)/);
+    if (efgMatch) {
+      try {
+        const decodedEfg = decodeURIComponent(efgMatch[1]);
+        const efgData = JSON.parse(atob(decodedEfg));
+        
+        if (efgData.xpv_asset_id) {
+          return efgData.xpv_asset_id.toString();
+        }
+        if (efgData.video_id) {
+          return efgData.video_id.toString();
+        }
+        if (efgData.id) {
+          return efgData.id.toString();
+        }
+      } catch (e) {
+        // If parsing fails, continue
+      }
+    }
+    
+    // Try other patterns
+    const patterns = [
+      /video_id[=:](\d+)/,
+      /asset_id[=:](\d+)/,
+      /id[=:](\d+)/
+    ];
+    
+    for (const pattern of patterns) {
+      const match = url.match(pattern);
+      if (match && match[1]) {
+        return match[1];
+      }
+    }
+    
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// ENHANCED TARGET STREAM CHECKING - Now uses asset ID context
+function checkIfTargetStream(url, postId, extractedAssetIds) {
+  if (!postId) return false;
+  
+  const postIdLower = postId.toLowerCase();
+  const urlLower = url.toLowerCase();
+  
+  // Extract asset ID from this stream
+  const streamAssetId = extractAssetId(url);
+  
+  // Strategy 1: If we only have ONE unique asset ID across all streams, it must be the target
+  if (extractedAssetIds && extractedAssetIds.size === 1 && streamAssetId) {
+    console.log('✓ Target matched: Only one asset ID found across all streams');
+    return true;
+  }
+  
+  // Strategy 2: If this is the FIRST stream with this asset ID (not a suggested video)
+  // This helps because the main video usually loads first
+  if (streamAssetId && extractedAssetIds && extractedAssetIds.size <= 2) {
+    // Among the first 2 asset IDs, prefer the larger one
+    console.log('✓ Target matched: Early stream (likely main video)');
+    return true;
+  }
+  
+  // Strategy 3: Direct match in URL
+  if (urlLower.includes(postIdLower)) {
+    console.log('✓ Target matched: Direct post ID in URL');
+    return true;
+  }
+  
+  // Strategy 4: Check for partial matches (last 8 digits minimum)
+  if (postId.length >= 8) {
+    const postIdEnd = postIdLower.slice(-8);
+    if (urlLower.includes(postIdEnd)) {
+      console.log('✓ Target matched: Partial post ID match');
+      return true;
+    }
+  }
+  
+  try {
+    // Strategy 5: Check _nc_vs parameter
+    const ncVsMatch = url.match(/_nc_vs=([^&]+)/);
+    if (ncVsMatch) {
+      try {
+        const encodedData = decodeURIComponent(ncVsMatch[1]);
+        const decodedData = atob(encodedData);
+        if (decodedData.toLowerCase().includes(postIdLower)) {
+          console.log('✓ Target matched: Found in _nc_vs');
+          return true;
+        }
+        // Check partial match in decoded data
+        if (postId.length >= 8 && decodedData.toLowerCase().includes(postIdLower.slice(-8))) {
+          console.log('✓ Target matched: Partial match in _nc_vs');
+          return true;
+        }
+      } catch (e) {
+        // Try without base64 decode
+        const encodedData = decodeURIComponent(ncVsMatch[1]);
+        if (encodedData.toLowerCase().includes(postIdLower)) {
+          console.log('✓ Target matched: Found in raw _nc_vs');
+          return true;
+        }
+      }
+    }
+    
+    // Strategy 6: Check efg parameter for asset_id match
+    const efgMatch = url.match(/efg=([^&]+)/);
+    if (efgMatch) {
+      const decodedEfg = decodeURIComponent(efgMatch[1]);
+      const efgData = JSON.parse(atob(decodedEfg));
+      
+      if (efgData.xpv_asset_id || efgData.video_id || efgData.id) {
+        const assetId = (efgData.xpv_asset_id || efgData.video_id || efgData.id).toString();
+        if (assetId.includes(postId) || postId.includes(assetId)) {
+          console.log('✓ Target matched: Found in efg asset ID');
+          return true;
+        }
+        // Check last 8 digits
+        if (postId.length >= 8 && assetId.length >= 8) {
+          if (assetId.slice(-8) === postIdLower.slice(-8)) {
+            console.log('✓ Target matched: Asset ID partial match');
+            return true;
+          }
+        }
+      }
+    }
+    
+    // Strategy 7: Check 'vs' parameter
+    const vsMatch = url.match(/vs=([^&]+)/);
+    if (vsMatch) {
+      const vsValue = vsMatch[1].toLowerCase();
+      if (vsValue.includes(postIdLower) || 
+          (postIdLower.length >= 6 && vsValue.includes(postIdLower.slice(-6)))) {
+        console.log('✓ Target matched: Found in vs parameter');
+        return true;
+      }
+    }
+    
+    // Strategy 8: Check 'oh' hash parameter
+    const ohMatch = url.match(/oh=([^&]+)/);
+    if (ohMatch && postId.length >= 6) {
+      const ohValue = ohMatch[1].toLowerCase();
+      if (ohValue.includes(postIdLower.slice(-6))) {
+        console.log('✓ Target matched: Found in oh parameter');
+        return true;
+      }
+    }
+    
+  } catch (e) {
+    console.error('Error checking target stream:', e);
+  }
+  
+  return false;
+}
+
+// IMPROVED STREAM SELECTION LOGIC
+function selectBestVideoStream(streams, postId) {
+  const videoEntries = Array.from(streams.videos.entries());
+  
+  if (videoEntries.length === 0) {
+    console.warn('No video streams found');
+    return null;
+  }
+  
+  console.log('=== STREAM SELECTION DEBUG ===');
+  console.log(`Total streams found: ${videoEntries.length}`);
+  console.log(`Target Post ID: ${postId}`);
+  
+  // Log all asset IDs we found
+  const allAssetIds = streams.allVideoStreams.map(s => s.assetId).filter(Boolean);
+  const uniqueAssetIds = [...new Set(allAssetIds)];
+  console.log(`Unique Asset IDs found: ${uniqueAssetIds.length} - [${uniqueAssetIds.join(', ')}]`);
+  
+  // PRIORITY 1: Target-specific streams (highest priority)
+  if (postId) {
+    const targetStreams = videoEntries.filter(([quality, data]) => data.isTarget);
+    console.log(`Target-matched streams: ${targetStreams.length}`);
+    
+    if (targetStreams.length > 0) {
+      const sorted = targetStreams.sort(([aQ, aData], [bQ, bData]) => {
+        const aQuality = parseInt(aQ) || 0;
+        const bQuality = parseInt(bQ) || 0;
+        
+        // Prefer higher quality
+        if (aQuality !== bQuality) return bQuality - aQuality;
+        
+        // Prefer progressive over DASH
+        if (aData.isProgressive !== bData.isProgressive) {
+          return aData.isProgressive ? -1 : 1;
+        }
+        
+        // Prefer higher bitrate
+        return (bData.bitrate || 0) - (aData.bitrate || 0);
+      });
+      
+      console.log(`✓ SELECTED: Target-matched stream - ${sorted[0][0]}p (Asset: ${sorted[0][1].assetId})`);
+      return sorted[0][1];
+    }
+  }
+  
+  // PRIORITY 1.5: If only ONE unique asset ID, use the highest quality from it
+  if (uniqueAssetIds.length === 1) {
+    const singleAssetStreams = videoEntries.filter(([quality, data]) => 
+      data.assetId === uniqueAssetIds[0]
+    );
+    
+    if (singleAssetStreams.length > 0) {
+      const sorted = singleAssetStreams.sort(([aQ, aData], [bQ, bData]) => {
+        const aQuality = parseInt(aQ) || 0;
+        const bQuality = parseInt(bQ) || 0;
+        if (aQuality !== bQuality) return bQuality - aQuality;
+        if (aData.isProgressive !== bData.isProgressive) {
+          return aData.isProgressive ? -1 : 1;
+        }
+        return (bData.bitrate || 0) - (aData.bitrate || 0);
+      });
+      
+      console.log(`✓ SELECTED: Single asset ID stream - ${sorted[0][0]}p (Asset: ${sorted[0][1].assetId})`);
+      return sorted[0][1];
+    }
+  }
+  
+  // PRIORITY 1.6: Multiple asset IDs but no target match - use LARGEST total size per asset
+  if (uniqueAssetIds.length > 1) {
+    console.log('⚠ Multiple asset IDs without clear target match - analyzing sizes...');
+    
+    // Group by asset ID and calculate total sizes
+    const assetGroups = {};
+    videoEntries.forEach(([quality, data]) => {
+      const assetId = data.assetId || 'unknown';
+      if (!assetGroups[assetId]) {
+        assetGroups[assetId] = {
+          streams: [],
+          totalSize: 0,
+          maxQuality: 0,
+          firstTimestamp: Infinity
+        };
+      }
+      assetGroups[assetId].streams.push([quality, data]);
+      assetGroups[assetId].totalSize += (data.contentLength || 0);
+      assetGroups[assetId].maxQuality = Math.max(
+        assetGroups[assetId].maxQuality, 
+        parseInt(quality) || 0
+      );
+      assetGroups[assetId].firstTimestamp = Math.min(
+        assetGroups[assetId].firstTimestamp,
+        data.timestamp
+      );
+    });
+    
+    // Find the "main" asset based on multiple factors
+    let bestAssetId = null;
+    let bestScore = -1;
+    
+    Object.entries(assetGroups).forEach(([assetId, group]) => {
+      let score = 0;
+      
+      // Factor 1: Total size (heavily weighted) - main video is usually larger
+      score += (group.totalSize / 1000000) * 2; // Points per MB
+      
+      // Factor 2: Number of quality variants - main video has more qualities
+      score += group.streams.length * 10;
+      
+      // Factor 3: Maximum quality available
+      score += group.maxQuality / 10;
+      
+      // Factor 4: Loading order - first is more likely to be main
+      const isFirst = group.firstTimestamp === Math.min(
+        ...Object.values(assetGroups).map(g => g.firstTimestamp)
+      );
+      if (isFirst) score += 20;
+      
+      console.log(`Asset ${assetId}: Score=${score.toFixed(1)} (Size: ${(group.totalSize/1000000).toFixed(1)}MB, Qualities: ${group.streams.length}, Max: ${group.maxQuality}p, First: ${isFirst})`);
+      
+      if (score > bestScore) {
+        bestScore = score;
+        bestAssetId = assetId;
+      }
+    });
+    
+    if (bestAssetId && assetGroups[bestAssetId]) {
+      const sorted = assetGroups[bestAssetId].streams.sort(([aQ, aData], [bQ, bData]) => {
+        const aQuality = parseInt(aQ) || 0;
+        const bQuality = parseInt(bQ) || 0;
+        if (aQuality !== bQuality) return bQuality - aQuality;
+        if (aData.isProgressive !== bData.isProgressive) {
+          return aData.isProgressive ? -1 : 1;
+        }
+        return (bData.bitrate || 0) - (aData.bitrate || 0);
+      });
+      
+      console.log(`✓ SELECTED: Best scoring asset - ${sorted[0][0]}p (Asset: ${bestAssetId}, Score: ${bestScore.toFixed(1)})`);
+      return sorted[0][1];
+    }
+  }
+  
+  // PRIORITY 2: Post-interaction streams with asset ID preference
+  if (streams.mainVideoInteractionTime) {
+    const postInteractionStreams = videoEntries.filter(([quality, data]) => 
+      data.timestamp > streams.mainVideoInteractionTime
+    );
+    
+    console.log(`Post-interaction streams: ${postInteractionStreams.length}`);
+    
+    if (postInteractionStreams.length > 0) {
+      // Group by asset ID and prefer the one with most streams or largest total size
+      const assetGroups = {};
+      postInteractionStreams.forEach(([quality, data]) => {
+        const assetId = data.assetId || 'unknown';
+        if (!assetGroups[assetId]) {
+          assetGroups[assetId] = [];
+        }
+        assetGroups[assetId].push([quality, data]);
+      });
+      
+      // Find the asset ID with the largest total size
+      let bestAssetId = null;
+      let maxTotalSize = 0;
+      
+      Object.entries(assetGroups).forEach(([assetId, streams]) => {
+        const totalSize = streams.reduce((sum, [q, d]) => sum + (d.contentLength || 0), 0);
+        if (totalSize > maxTotalSize) {
+          maxTotalSize = totalSize;
+          bestAssetId = assetId;
+        }
+      });
+      
+      if (bestAssetId && assetGroups[bestAssetId]) {
+        const sorted = assetGroups[bestAssetId].sort(([aQ, aData], [bQ, bData]) => {
+          const aQuality = parseInt(aQ) || 0;
+          const bQuality = parseInt(bQ) || 0;
+          if (aQuality !== bQuality) return bQuality - aQuality;
+          if (aData.isProgressive !== bData.isProgressive) {
+            return aData.isProgressive ? -1 : 1;
+          }
+          return (bData.bitrate || 0) - (aData.bitrate || 0);
+        });
+        
+        console.log(`✓ SELECTED: Post-interaction stream - ${sorted[0][0]}p (Asset: ${bestAssetId}, Total size: ${maxTotalSize})`);
+        return sorted[0][1];
+      }
+    }
+  }
+  
+  // PRIORITY 3: Fallback - prefer the asset ID with largest total size
+  console.warn('⚠ Using fallback selection with asset ID grouping');
+  
+  // Group all streams by asset ID
+  const assetGroups = {};
+  videoEntries.forEach(([quality, data]) => {
+    const assetId = data.assetId || 'unknown';
+    if (!assetGroups[assetId]) {
+      assetGroups[assetId] = [];
+    }
+    assetGroups[assetId].push([quality, data]);
+  });
+  
+  // Find the asset ID with the largest total size
+  let bestAssetId = null;
+  let maxTotalSize = 0;
+  
+  Object.entries(assetGroups).forEach(([assetId, streams]) => {
+    const totalSize = streams.reduce((sum, [q, d]) => sum + (d.contentLength || 0), 0);
+    if (totalSize > maxTotalSize) {
+      maxTotalSize = totalSize;
+      bestAssetId = assetId;
+    }
+  });
+  
+  if (bestAssetId && assetGroups[bestAssetId]) {
+    const sorted = assetGroups[bestAssetId].sort(([aQ, aData], [bQ, bData]) => {
+      const aQuality = parseInt(aQ) || 0;
+      const bQuality = parseInt(bQ) || 0;
+      if (aQuality !== bQuality) return bQuality - aQuality;
+      if (aData.isProgressive !== bData.isProgressive) {
+        return aData.isProgressive ? -1 : 1;
+      }
+      return (bData.bitrate || 0) - (aData.bitrate || 0);
+    });
+    
+    console.log(`⚠ FALLBACK SELECTED: ${sorted[0][0]}p (Asset: ${bestAssetId}, Total size: ${maxTotalSize})`);
+    return sorted[0][1];
+  }
+  
+  // Ultimate fallback - just pick highest quality
+  const sorted = videoEntries.sort(([aQ, aData], [bQ, bData]) => {
+    const aQuality = parseInt(aQ) || 0;
+    const bQuality = parseInt(bQ) || 0;
+    if (aQuality !== bQuality) return bQuality - aQuality;
+    return (bData.bitrate || 0) - (aData.bitrate || 0);
+  });
+  
+  console.log(`⚠ ULTIMATE FALLBACK: ${sorted[0][0]}p`);
+  return sorted[0][1];
+}
+
+function selectBestAudioStream(streams, postId) {
+  if (streams.audios.length === 0) return null;
+  
+  // Get all unique asset IDs from video streams
+  const videoAssetIds = streams.allVideoStreams
+    .map(s => s.assetId)
+    .filter(Boolean);
+  const uniqueVideoAssetIds = [...new Set(videoAssetIds)];
+  
+  // If we have a clear target asset ID from video selection, match audio to it
+  if (uniqueVideoAssetIds.length === 1) {
+    const matchingAudio = streams.audios.find(audio => 
+      audio.assetId === uniqueVideoAssetIds[0]
+    );
+    if (matchingAudio) {
+      console.log('Using asset-matched audio stream');
+      return matchingAudio.url;
+    }
+  }
+  
+  // Fallback to target-specific audio
+  if (postId) {
+    const targetAudio = streams.audios.find(audio => audio.isTarget);
+    if (targetAudio) {
+      console.log('Using target-specific audio stream');
+      return targetAudio.url;
+    }
+  }
+  
+  // Fallback to highest quality audio
+  const sortedAudios = streams.audios.sort((a, b) => {
+    const bitrateDiff = (b.bitrate || 0) - (a.bitrate || 0);
+    if (Math.abs(bitrateDiff) > 50000) return bitrateDiff;
+    return (b.timestamp || 0) - (a.timestamp || 0);
+  });
+  
+  console.log(`Using best audio stream (bitrate: ${sortedAudios[0].bitrate || 'unknown'})`);
+  return sortedAudios[0].url;
+}
+
+// VERIFICATION FUNCTION
+function verifyStreamSelection(selectedStream, allStreams, postId) {
+  console.log('=== STREAM VERIFICATION ===');
+  
+  if (!selectedStream) {
+    console.error('❌ No stream selected');
+    return false;
+  }
+  
+  // If we found a target-matched stream, we're confident
+  if (selectedStream.isTarget) {
+    console.log('✓ High confidence - stream matched target post ID');
+    return true;
+  }
+  
+  // Get all unique asset IDs
+  const allAssetIds = Array.from(allStreams.videos.values())
+    .map(s => s.assetId)
+    .filter(Boolean);
+  const uniqueAssetIds = [...new Set(allAssetIds)];
+  
+  // If only one asset ID exists, high confidence
+  if (uniqueAssetIds.length === 1) {
+    console.log('✓ High confidence - only one asset ID found');
+    return true;
+  }
+  
+  // Check if this stream's asset has significantly more content
+  const assetSizes = {};
+  Array.from(allStreams.videos.values()).forEach(stream => {
+    const assetId = stream.assetId || 'unknown';
+    assetSizes[assetId] = (assetSizes[assetId] || 0) + (stream.contentLength || 0);
+  });
+  
+  const selectedAssetSize = assetSizes[selectedStream.assetId] || 0;
+  const avgOtherSize = Object.entries(assetSizes)
+    .filter(([id]) => id !== selectedStream.assetId)
+    .reduce((sum, [, size]) => sum + size, 0) / (Object.keys(assetSizes).length - 1 || 1);
+  
+  if (selectedAssetSize > avgOtherSize * 1.5) {
+    console.log('✓ Medium confidence - selected asset is significantly larger');
+    return true;
+  }
+  
+  // Check if selected asset has more quality variants
+  const assetQualityCounts = {};
+  Array.from(allStreams.videos.values()).forEach(stream => {
+    const assetId = stream.assetId || 'unknown';
+    assetQualityCounts[assetId] = (assetQualityCounts[assetId] || 0) + 1;
+  });
+  
+  const selectedQualityCount = assetQualityCounts[selectedStream.assetId] || 0;
+  const maxOtherCount = Math.max(
+    ...Object.entries(assetQualityCounts)
+      .filter(([id]) => id !== selectedStream.assetId)
+      .map(([, count]) => count),
+    0
+  );
+  
+  if (selectedQualityCount > maxOtherCount) {
+    console.log('⚠ Medium confidence - selected asset has more quality variants');
+    return true;
+  }
+  
+  // If stream was loaded after video interaction, medium confidence
+  if (allStreams.mainVideoInteractionTime && selectedStream.timestamp > allStreams.mainVideoInteractionTime) {
+    console.log('⚠ Medium confidence - stream loaded after video interaction');
+    return true;
+  }
+  
+  console.warn('⚠ Low confidence - could not verify this is the correct video');
+  return false;
+}
+
+function convertToMobileUrl(url) {
+  try {
+    let mobileUrl = url;
+    
+    if (url.includes('www.facebook.com')) {
+      mobileUrl = url.replace('www.facebook.com', 'm.facebook.com');
+    } else if (url.includes('facebook.com') && !url.includes('m.facebook.com')) {
+      mobileUrl = url.replace('facebook.com', 'm.facebook.com');
+    }
+    
+    if (mobileUrl.includes('/watch/')) {
+      mobileUrl = mobileUrl.replace('/watch/', '/video.php?v=');
+    }
+    
+    return mobileUrl;
+  } catch (error) {
+    return url;
+  }
+}
+
+function convertToDesktopUrl(url) {
+  try {
+    let desktopUrl = url;
+    
+    if (url.includes('m.facebook.com')) {
+      desktopUrl = url.replace('m.facebook.com', 'www.facebook.com');
+    }
+    
+    return desktopUrl;
+  } catch (error) {
+    return url;
+  }
+}
+
+function extractQuality(url) {
+  return extractQualityImproved(url);
+}
+
 async function mergeStreams(videoUrl, audioUrl, outputDir) {
   const videoPath = path.join(outputDir, `video_${Date.now()}.mp4`);
   const audioPath = path.join(outputDir, `audio_${Date.now()}.mp4`);
   const outputPath = path.join(outputDir, `merged_${Date.now()}.mp4`);
 
   try {
-    // Download both streams
+    console.log('Downloading video and audio streams...');
     await downloadFile(videoUrl, videoPath);
     await downloadFile(audioUrl, audioPath);
 
-    // Merge using FFmpeg
+    console.log('Merging streams with ffmpeg...');
     await new Promise((resolve, reject) => {
       ffmpeg()
         .input(videoPath)
@@ -603,47 +1449,53 @@ async function mergeStreams(videoUrl, audioUrl, outputDir) {
           '-avoid_negative_ts make_zero'
         ])
         .save(outputPath)
-        .on('end', resolve)
-        .on('error', reject);
+        .on('end', () => {
+          console.log('Merge completed successfully');
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('FFmpeg error:', err);
+          reject(err);
+        });
     });
 
-    // Cleanup temp files
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
 
     return outputPath;
   } catch (error) {
-    // Cleanup on error
     await fs.unlink(videoPath).catch(() => {});
     await fs.unlink(audioPath).catch(() => {});
     throw error;
   }
 }
 
-/**
- * Download a file from URL
- */
 async function downloadFile(url, filepath) {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-      'Accept': '*/*',
-      'Accept-Encoding': 'identity',
-      'Range': 'bytes=0-'
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15',
+        'Accept': '*/*',
+        'Accept-Encoding': 'identity',
+        'Range': 'bytes=0-'
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
-  });
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
+    const writer = fsSync.createWriteStream(filepath);
+    
+    return new Promise((resolve, reject) => {
+      response.body.pipe(writer);
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+  } catch (error) {
+    console.error(`Download failed for ${url}:`, error);
+    throw error;
   }
-
-  const writer = fsSync.createWriteStream(filepath);
-  
-  return new Promise((resolve, reject) => {
-    response.body.pipe(writer);
-    writer.on('finish', resolve);
-    writer.on('error', reject);
-  });
 }
 
 module.exports = router;
