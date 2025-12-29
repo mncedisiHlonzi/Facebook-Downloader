@@ -45,10 +45,12 @@ router.post('/fetch-fb-video-data', async (req, res) => {
     console.log('Loading page:', url);
 
     // STRATEGY 1: Try to extract video data from page source/scripts
+    console.log('Trying Strategy 1: Page source extraction...');
     const videoData = await extractVideoFromPageSource(page, url);
     
     if (videoData && videoData.videoUrl) {
       console.log('✓ Successfully extracted video from page source');
+      console.log('Video URL:', videoData.videoUrl.substring(0, 100) + '...');
       return res.json({
         status: 'success',
         data: {
@@ -64,11 +66,12 @@ router.post('/fetch-fb-video-data', async (req, res) => {
     }
 
     // STRATEGY 2: If page source extraction fails, use DOM-based approach
-    console.log('Page source extraction failed, trying DOM approach...');
+    console.log('Strategy 1 failed, trying Strategy 2: DOM extraction...');
     const domVideoData = await extractVideoFromDOM(page, url);
     
     if (domVideoData && domVideoData.videoUrl) {
       console.log('✓ Successfully extracted video from DOM');
+      console.log('Video URL:', domVideoData.videoUrl.substring(0, 100) + '...');
       return res.json({
         status: 'success',
         data: {
@@ -84,11 +87,12 @@ router.post('/fetch-fb-video-data', async (req, res) => {
     }
 
     // STRATEGY 3: Network monitoring as last resort (with improved filtering)
-    console.log('DOM extraction failed, trying network monitoring...');
+    console.log('Strategy 2 failed, trying Strategy 3: Network monitoring...');
     const networkVideoData = await extractVideoFromNetwork(page, url);
     
     if (networkVideoData && networkVideoData.videoUrl) {
       console.log('✓ Successfully extracted video from network');
+      console.log('Video URL:', networkVideoData.videoUrl.substring(0, 100) + '...');
       return res.json({
         status: 'success',
         data: {
@@ -136,7 +140,7 @@ async function extractVideoFromPageSource(page, url) {
       throw new Error('Page not found');
     }
 
-    await page.waitForTimeout(3000);
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Extract video data from page scripts and JSON-LD
     const videoData = await page.evaluate(() => {
@@ -171,48 +175,69 @@ async function extractVideoFromPageSource(page, url) {
 
       // Method 2: Search through all scripts for video URLs in JavaScript objects
       const allScripts = document.querySelectorAll('script');
+      let scriptCount = 0;
+      
       for (const script of allScripts) {
         const content = script.textContent || script.innerHTML;
+        scriptCount++;
         
         // Look for playable_url, which is Facebook's video URL field
         const playableUrlMatch = content.match(/"playable_url(?:_quality_hd)?":"([^"]+)"/);
         if (playableUrlMatch) {
           results.videoUrl = playableUrlMatch[1].replace(/\\u0025/g, '%').replace(/\\u002F/g, '/').replace(/\\\//g, '/');
-          console.log('Found video via playable_url');
+          console.log('Found video via playable_url in script', scriptCount);
+          break;
         }
 
         // Look for browser_native_hd_url or browser_native_sd_url
         const browserNativeMatch = content.match(/"browser_native_(?:hd|sd)_url":"([^"]+)"/);
-        if (browserNativeMatch && !results.videoUrl) {
+        if (browserNativeMatch) {
           results.videoUrl = browserNativeMatch[1].replace(/\\u0025/g, '%').replace(/\\u002F/g, '/').replace(/\\\//g, '/');
-          console.log('Found video via browser_native_url');
+          console.log('Found video via browser_native_url in script', scriptCount);
+          break;
         }
 
         // Look for video_url
         const videoUrlMatch = content.match(/"video_url":"([^"]+)"/);
-        if (videoUrlMatch && !results.videoUrl) {
+        if (videoUrlMatch) {
           results.videoUrl = videoUrlMatch[1].replace(/\\u0025/g, '%').replace(/\\u002F/g, '/').replace(/\\\//g, '/');
-          console.log('Found video via video_url');
+          console.log('Found video via video_url in script', scriptCount);
+          break;
+        }
+
+        // Look for download_url
+        const downloadUrlMatch = content.match(/"download_url":"([^"]+)"/);
+        if (downloadUrlMatch) {
+          results.videoUrl = downloadUrlMatch[1].replace(/\\u0025/g, '%').replace(/\\u002F/g, '/').replace(/\\\//g, '/');
+          console.log('Found video via download_url in script', scriptCount);
+          break;
+        }
+
+        // Look for src in video object
+        const srcMatch = content.match(/"src":"(https:[^"]*\.mp4[^"]*)"/);
+        if (srcMatch) {
+          results.videoUrl = srcMatch[1].replace(/\\u0025/g, '%').replace(/\\u002F/g, '/').replace(/\\\//g, '/');
+          console.log('Found video via src in script', scriptCount);
+          break;
         }
 
         // Extract title
-        if (!results.title) {
-          const titleMatch = content.match(/"title":\{"text":"([^"]+)"/);
-          if (titleMatch) {
-            results.title = titleMatch[1].replace(/\\u([0-9a-fA-F]{4})/g, (match, code) => 
-              String.fromCharCode(parseInt(code, 16))
-            );
-          }
+        const titleMatch = content.match(/"title":\{"text":"([^"]+)"/);
+        if (titleMatch && !results.title) {
+          results.title = titleMatch[1].replace(/\\u([0-9a-fA-F]{4})/g, (match, code) => 
+            String.fromCharCode(parseInt(code, 16))
+          );
         }
 
         // Extract thumbnail
-        if (!results.thumbnail) {
-          const thumbMatch = content.match(/"preferred_thumbnail":\{"image":\{"uri":"([^"]+)"/);
-          if (thumbMatch) {
-            results.thumbnail = thumbMatch[1].replace(/\\u0025/g, '%').replace(/\\\//g, '/');
-          }
+        const thumbMatch = content.match(/"preferred_thumbnail":\{"image":\{"uri":"([^"]+)"/);
+        if (thumbMatch && !results.thumbnail) {
+          results.thumbnail = thumbMatch[1].replace(/\\u0025/g, '%').replace(/\\\//g, '/');
         }
       }
+      
+      console.log('Searched through', scriptCount, 'scripts');
+      console.log('Video URL found:', !!results.videoUrl);
 
       // Method 3: Check meta tags as fallback
       if (!results.videoUrl) {
@@ -277,7 +302,7 @@ async function extractVideoFromDOM(page, url) {
       timeout: 45000
     });
 
-    await page.waitForTimeout(3000);
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Wait for video element to appear
     await page.waitForSelector('video', { timeout: 10000 }).catch(() => {});
@@ -348,30 +373,20 @@ async function extractVideoFromNetwork(page, url) {
       metadata: {}
     };
 
-    let targetVideoElement = null;
+    // Setup CDP session for network monitoring (more reliable)
+    const client = await page.target().createCDPSession();
+    await client.send('Network.enable');
 
-    // Setup network interception
-    await page.setRequestInterception(true);
-    
-    page.on('request', (request) => {
-      const resourceType = request.resourceType();
-      if (['document', 'xhr', 'fetch', 'media'].includes(resourceType)) {
-        request.continue();
-      } else {
-        request.abort();
-      }
-    });
-
-    page.on('response', async (response) => {
+    client.on('Network.responseReceived', async (params) => {
       try {
-        const responseUrl = response.url();
-        const contentType = response.headers()['content-type'] || '';
+        const response = params.response;
+        const responseUrl = response.url;
+        const contentType = response.mimeType || '';
 
         // Only capture video from the main video element
         if (contentType.includes('video/mp4') || responseUrl.includes('.mp4')) {
-          // Store but don't immediately select
           const quality = extractQuality(responseUrl);
-          const size = parseInt(response.headers()['content-length'] || '0');
+          const size = parseInt(response.headers['content-length'] || '0');
           
           if (!streams.video || (quality && (!streams.video.quality || quality > streams.video.quality))) {
             streams.video = {
@@ -399,7 +414,7 @@ async function extractVideoFromNetwork(page, url) {
       timeout: 45000
     });
 
-    await page.waitForTimeout(3000);
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     // Find and interact with the MAIN video only
     await page.evaluate(() => {
@@ -422,7 +437,7 @@ async function extractVideoFromNetwork(page, url) {
       }
     });
 
-    await page.waitForTimeout(5000);
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
     // Get metadata
     streams.metadata = await page.evaluate(() => {
